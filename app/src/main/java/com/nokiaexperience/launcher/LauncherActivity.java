@@ -196,19 +196,32 @@ public final class LauncherActivity extends Activity {
     private boolean exp2(){return interfaceStyle().equals("exp2");}
     private SharedPreferences profilePrefs(){return exp2()?exp2Prefs:prefs;}
     private void seedExp2Profile(){
-        if(exp2Prefs.getBoolean("initialized",false))return;
-        SharedPreferences.Editor copy=exp2Prefs.edit()
-            .putString("menu_state",prefs.getString("menu_state","{}"))
-            .putString("home_workspace",prefs.getString("home_workspace","{}"))
-            .putString("widgets",prefs.getString("widgets",""));
-        String widgets=prefs.getString("widgets","");
-        if(!widgets.isEmpty())for(String id:widgets.split(","))try{
-            int widgetId=Integer.parseInt(id);
-            copy.putInt("widget_page_"+id,prefs.getInt("widget_page_"+widgetId,0));
-            copy.putInt("widget_width_"+id,prefs.getInt("widget_width_"+widgetId,-1));
-            copy.putInt("widget_height_"+id,prefs.getInt("widget_height_"+widgetId,180));
-        }catch(NumberFormatException ignored){}
-        copy.putBoolean("initialized",true).apply();
+        if(!exp2Prefs.getBoolean("initialized",false)){
+            SharedPreferences.Editor copy=exp2Prefs.edit()
+                .putString("menu_state",prefs.getString("menu_state","{}"))
+                .putString("home_workspace",prefs.getString("home_workspace","{}"))
+                .putString("widgets",prefs.getString("widgets",""));
+            String widgets=prefs.getString("widgets","");
+            if(!widgets.isEmpty())for(String id:widgets.split(","))try{
+                int widgetId=Integer.parseInt(id);
+                copy.putInt("widget_page_"+id,prefs.getInt("widget_page_"+widgetId,0));
+                copy.putInt("widget_width_"+id,prefs.getInt("widget_width_"+widgetId,-1));
+                copy.putInt("widget_height_"+id,prefs.getInt("widget_height_"+widgetId,180));
+            }catch(NumberFormatException ignored){}
+            copy.putBoolean("initialized",true).apply();
+        }
+        if(!exp2Prefs.getBoolean("profile_settings_initialized",false)){
+            SharedPreferences.Editor settings=exp2Prefs.edit();
+            settings.putString("theme_color",prefs.getString("theme_color","profile"));
+            settings.putInt("window_transparency",windowTransparencyFrom(prefs));
+            settings.putInt("drawer_dim",prefs.getInt("drawer_dim",38));
+            settings.putInt("blur",prefs.getInt("blur",1));
+            settings.putInt("drawer_rows",prefs.getInt("drawer_rows",6));
+            settings.putInt("dock_count",prefs.getInt("dock_count",3));
+            for(int i=0;i<4;i++)if(prefs.contains("shortcut_"+i))
+                settings.putString("shortcut_"+i,prefs.getString("shortcut_"+i,""));
+            settings.putBoolean("profile_settings_initialized",true).apply();
+        }
     }
     private void loadProfileData(){
         SharedPreferences data=profilePrefs();
@@ -218,7 +231,7 @@ public final class LauncherActivity extends Activity {
     private int accent(){
         if(interfaceStyle().equals("n95"))return 0xFF338BEB;
         if(interfaceStyle().equals("5530"))return 0xFFF04A3D;
-        switch(prefs.getString("theme_color","profile")){
+        switch(profilePrefs().getString("theme_color","profile")){
             case "red":return 0xFFFF3636;
             case "blue":return 0xFF208FFF;
             case "black":return 0xFF181A22;
@@ -229,9 +242,12 @@ public final class LauncherActivity extends Activity {
         }
     }
     private int windowTransparency(){
+        return windowTransparencyFrom(profilePrefs());
+    }
+    private int windowTransparencyFrom(SharedPreferences source){
         int value=35;
-        try{value=prefs.contains("window_transparency")?prefs.getInt("window_transparency",35):
-            prefs.contains("opacity_menu")?100-prefs.getInt("opacity_menu",65):35;}
+        try{value=source.contains("window_transparency")?source.getInt("window_transparency",35):
+            source.contains("opacity_menu")?100-source.getInt("opacity_menu",65):35;}
         catch(ClassCastException ignored){}
         return Math.max(0,Math.min(90,value));
     }
@@ -345,14 +361,14 @@ public final class LauncherActivity extends Activity {
         String[] defaults={"phone","chrome","camera","contacts"};
         for(int i=0;i<dockCount();i++){
             final int slot=i;
-            MenuModel.Entry e=special(prefs.getString("shortcut_"+i,defaults[i]));
+            MenuModel.Entry e=special(profilePrefs().getString("shortcut_"+i,defaults[i]));
             LinearLayout cell=iconCell(e,74);
             dock.addView(cell,new LinearLayout.LayoutParams(0,-1,1));
             cell.setOnClickListener(v->{sounds.tap();launch(e);});
             cell.setOnLongClickListener(v->{chooseShortcut(slot);return true;});
         }
     }
-    private int dockCount(){return Math.max(3,Math.min(4,prefs.getInt("dock_count",3)));}
+    private int dockCount(){return Math.max(3,Math.min(4,profilePrefs().getInt("dock_count",3)));}
     private MenuModel.Entry homeEntry(String key){
         if(workspaceModel.isFolder(key))return new MenuModel.Entry(key,workspaceModel.folderName(key),"files");
         if(key.equals("phone")||key.equals("chrome")||key.equals("camera"))return special(key);
@@ -718,7 +734,7 @@ public final class LauncherActivity extends Activity {
     private void rebuildPages(){
         if(pager==null||pageStrip==null||pager.getWidth()<=0||pager.getHeight()<=0)return;
         drawerEntries.clear();drawerEntries.addAll(items());
-        int rows=prefs.getInt("drawer_rows",6),perPage=3*rows;
+        int rows=profilePrefs().getInt("drawer_rows",6),perPage=3*rows;
         int pageWidth=pager.getWidth(),pageHeight=pager.getHeight();
         int pageCount=Math.max(1,(drawerEntries.size()+perPage-1)/perPage);
         currentPage=Math.max(0,Math.min(currentPage,pageCount-1));
@@ -758,7 +774,7 @@ public final class LauncherActivity extends Activity {
     private int drawerIndexAt(View target,DragEvent event){
         int[] where=new int[2],pagerWhere=new int[2];target.getLocationOnScreen(where);pager.getLocationOnScreen(pagerWhere);
         float x=where[0]+event.getX()-pagerWhere[0],y=where[1]+event.getY()-pagerWhere[1];
-        int rows=prefs.getInt("drawer_rows",6),perPage=3*rows;
+        int rows=profilePrefs().getInt("drawer_rows",6),perPage=3*rows;
         int column=Math.max(0,Math.min(2,(int)(x/Math.max(1,pager.getWidth()/3))));
         int row=Math.max(0,Math.min(rows-1,(int)(y/Math.max(1,pager.getHeight()/rows))));
         return Math.min(drawerEntries.size()-1,currentPage*perPage+row*3+column);
@@ -771,7 +787,7 @@ public final class LauncherActivity extends Activity {
         }
         int[] where=new int[2],pagerWhere=new int[2];target.getLocationOnScreen(where);pager.getLocationOnScreen(pagerWhere);
         float x=where[0]+event.getX()-pagerWhere[0],y=where[1]+event.getY()-pagerWhere[1];
-        float cellWidth=Math.max(1f,pager.getWidth()/3f),cellHeight=Math.max(1f,pager.getHeight()/(float)prefs.getInt("drawer_rows",6));
+        float cellWidth=Math.max(1f,pager.getWidth()/3f),cellHeight=Math.max(1f,pager.getHeight()/(float)profilePrefs().getInt("drawer_rows",6));
         float fractionX=(x%cellWidth)/cellWidth,fractionY=(y%cellHeight)/cellHeight;
         return fractionX>0.22f&&fractionX<0.78f&&fractionY>0.15f&&fractionY<0.78f;
     }
@@ -780,7 +796,7 @@ public final class LauncherActivity extends Activity {
         int[] where=new int[2],pagerWhere=new int[2];
         target.getLocationOnScreen(where);pager.getLocationOnScreen(pagerWhere);
         float x=where[0]+event.getX()-pagerWhere[0],y=where[1]+event.getY()-pagerWhere[1];
-        int rows=prefs.getInt("drawer_rows",6),perPage=3*rows;
+        int rows=profilePrefs().getInt("drawer_rows",6),perPage=3*rows;
         float width=pager.getWidth()/3f,height=pager.getHeight()/(float)rows;
         int column=(int)(x/Math.max(1f,width)),row=(int)(y/Math.max(1f,height));
         if(column<0||column>=3||row<0||row>=rows)return null;
@@ -843,7 +859,7 @@ public final class LauncherActivity extends Activity {
         if(currentPage>=pageStrip.getChildCount())return;
         View page=pageStrip.getChildAt(currentPage);if(!(page instanceof ViewGroup))return;
         int source=-1;for(int i=0;i<drawerEntries.size();i++)if(drawerEntries.get(i).key.equals(activeDragKey)){source=i;break;}
-        int rows=prefs.getInt("drawer_rows",6),perPage=3*rows,pageStart=currentPage*perPage;
+        int rows=profilePrefs().getInt("drawer_rows",6),perPage=3*rows,pageStart=currentPage*perPage;
         int cellWidth=pager.getWidth()/3,cellHeight=pager.getHeight()/rows;
         ViewGroup lines=(ViewGroup)page;
         for(int r=0;r<lines.getChildCount();r++){
@@ -1272,14 +1288,14 @@ public final class LauncherActivity extends Activity {
     private void chooseDockSlot(MenuModel.Entry e){
         String[] positions=new String[dockCount()];for(int i=0;i<positions.length;i++)positions[i]="Позиция "+(i+1);
         new AlertDialog.Builder(this).setTitle("Ярлык Home").setItems(positions,(d,n)->{
-            prefs.edit().putString("shortcut_"+n,e.key).apply();buildDock();
+            profilePrefs().edit().putString("shortcut_"+n,e.key).apply();buildDock();
         }).show();
     }
     private void chooseShortcut(int slot){
         ArrayList<MenuModel.Entry> choices=new ArrayList<>(allInstalled());
         choices.add(0,special("phone"));choices.add(1,special("chrome"));choices.add(2,special("camera"));
         String[] labels=new String[choices.size()];for(int i=0;i<labels.length;i++)labels[i]=choices.get(i).label;
-        new AlertDialog.Builder(this).setTitle("Ярлык "+(slot+1)).setItems(labels,(d,n)->{prefs.edit().putString("shortcut_"+slot,choices.get(n).key).apply();buildDock();}).show();
+        new AlertDialog.Builder(this).setTitle("Ярлык "+(slot+1)).setItems(labels,(d,n)->{profilePrefs().edit().putString("shortcut_"+slot,choices.get(n).key).apply();buildDock();}).show();
     }
     private void moveToFolder(MenuModel.Entry e){
         ArrayList<String> ids=new ArrayList<>(),names=new ArrayList<>();
@@ -1381,10 +1397,10 @@ public final class LauncherActivity extends Activity {
     private void chooseThemeColor(){
         String[] names={"Красный","Синий","Чёрный","Оранжевый","Голубой","Белый"};
         String[] values={"red","blue","black","orange","cyan","white"};
-        int selected=Arrays.asList(values).indexOf(prefs.getString("theme_color","profile"));
+        int selected=Arrays.asList(values).indexOf(profilePrefs().getString("theme_color","profile"));
         showSettingsDialog(new AlertDialog.Builder(this).setTitle("Цвет Nokia UI")
             .setSingleChoiceItems(names,Math.max(0,selected),(d,n)->{
-                prefs.edit().putString("theme_color",values[n]).apply();d.dismiss();
+                profilePrefs().edit().putString("theme_color",values[n]).apply();d.dismiss();
                 applyWindowTransparency();buildDock();refreshGrid();refreshWorkspace();
             }).setNegativeButton("‹ Назад",(d,w)->showAppearanceSettings()));
     }
@@ -1395,32 +1411,32 @@ public final class LauncherActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Ярлыки Home").setItems(choices,(d,n)->{
             if(n==0)new AlertDialog.Builder(this).setTitle("Иконок в доке")
                 .setSingleChoiceItems(new String[]{"3","4"},dockCount()-3,(dialog,selected)->{
-                    prefs.edit().putInt("dock_count",selected+3).apply();dialog.dismiss();buildDock();
+                    profilePrefs().edit().putInt("dock_count",selected+3).apply();dialog.dismiss();buildDock();
                 }).show();
             else chooseShortcut(n-1);
         }).show();
     }
     private void chooseGrid(){
-        new AlertDialog.Builder(this).setTitle("Сетка приложений").setSingleChoiceItems(new String[]{"3 × 5","3 × 6"},prefs.getInt("drawer_rows",6)==5?0:1,(d,n)->{
-            prefs.edit().putInt("drawer_rows",n==0?5:6).apply();refreshGrid();d.dismiss();
+        new AlertDialog.Builder(this).setTitle("Сетка приложений").setSingleChoiceItems(new String[]{"3 × 5","3 × 6"},profilePrefs().getInt("drawer_rows",6)==5?0:1,(d,n)->{
+            profilePrefs().edit().putInt("drawer_rows",n==0?5:6).apply();refreshGrid();d.dismiss();
         }).show();
     }
     private void chooseBlur(){
-        new AlertDialog.Builder(this).setTitle("Размытие обоев").setSingleChoiceItems(new String[]{"Выкл","Низкое","Среднее","Сильное"},prefs.getInt("blur",1),(d,n)->{
-            prefs.edit().putInt("blur",n).apply();updateDrawerBackground();d.dismiss();
+        new AlertDialog.Builder(this).setTitle("Размытие обоев").setSingleChoiceItems(new String[]{"Выкл","Низкое","Среднее","Сильное"},profilePrefs().getInt("blur",1),(d,n)->{
+            profilePrefs().edit().putInt("blur",n).apply();updateDrawerBackground();d.dismiss();
         }).show();
     }
     private void chooseDim(){
-        SeekBar bar=new SeekBar(this);bar.setMax(70);bar.setProgress(prefs.getInt("drawer_dim",38));
+        SeekBar bar=new SeekBar(this);bar.setMax(70);bar.setProgress(profilePrefs().getInt("drawer_dim",38));
         new AlertDialog.Builder(this).setTitle("Затемнение меню").setMessage("0–70 %, обои остаются видимыми").setView(bar)
-            .setPositiveButton("Сохранить",(d,w)->{prefs.edit().putInt("drawer_dim",bar.getProgress()).apply();updateDrawerBackground();}).setNegativeButton("Отмена",null).show();
+            .setPositiveButton("Сохранить",(d,w)->{profilePrefs().edit().putInt("drawer_dim",bar.getProgress()).apply();updateDrawerBackground();}).setNegativeButton("Отмена",null).show();
     }
     private void chooseWindowTransparency(){
         SeekBar bar=new SeekBar(this);bar.setMax(90);bar.setProgress(windowTransparency());
         new AlertDialog.Builder(this).setTitle("Прозрачность окон")
             .setMessage("Панели Nokia, док и затемнение меню · 0–90 %").setView(bar)
             .setPositiveButton("Сохранить",(d,w)->{
-                prefs.edit().putInt("window_transparency",bar.getProgress()).apply();applyWindowTransparency();
+                profilePrefs().edit().putInt("window_transparency",bar.getProgress()).apply();applyWindowTransparency();
             }).setNegativeButton("Отмена",null).show();
     }
     private void applyWindowTransparency(){
@@ -1479,7 +1495,7 @@ public final class LauncherActivity extends Activity {
         if(drawer==null||wallpaper==null)return;
         ImageView layer=drawer.findViewWithTag("blur");View dim=drawer.findViewWithTag("dim");
         if(layer==null||dim==null)return;
-        Drawable source=wallpaper.getDrawable();int level=prefs.getInt("blur",1);
+        Drawable source=wallpaper.getDrawable();int level=profilePrefs().getInt("blur",1);
         if(source!=null&&level>0){
             if(source!=cachedDrawerSource||level!=cachedDrawerBlur||cachedDrawerBitmap==null){
                 Bitmap sample=Bitmap.createBitmap(90,160,Bitmap.Config.ARGB_8888);
@@ -1491,7 +1507,7 @@ public final class LauncherActivity extends Activity {
             }
             layer.setImageBitmap(cachedDrawerBitmap);
         }else layer.setImageDrawable(source);
-        int alpha=Math.round(Math.max(0,Math.min(70,prefs.getInt("drawer_dim",38)))*255/100f);
+        int alpha=Math.round(Math.max(0,Math.min(70,profilePrefs().getInt("drawer_dim",38)))*255/100f);
         dim.setBackgroundColor((alpha<<24)|0x0010233C);
     }
     private Bitmap blur(Bitmap input,int radius){
