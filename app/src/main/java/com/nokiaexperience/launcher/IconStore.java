@@ -8,7 +8,10 @@ import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.util.LruCache;
+import org.json.JSONObject;
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.Locale;
 
 /** Nokia manual artwork shared by both profiles; per-app SAF overrides win. */
@@ -16,16 +19,31 @@ public final class IconStore {
     private final Context context;
     private final SharedPreferences prefs;
     private final AssetRepository assets;
+    private final boolean exp2;
+    private JSONObject exp2Defaults;
     private final LruCache<String,Bitmap> custom=new LruCache<String,Bitmap>(8*1024){
         @Override protected int sizeOf(String key,Bitmap image){return Math.max(1,image.getByteCount()/1024);}
     };
+    private final LruCache<String,Bitmap> bundled=new LruCache<String,Bitmap>(8*1024){
+        @Override protected int sizeOf(String key,Bitmap image){return Math.max(1,image.getByteCount()/1024);}
+    };
     public IconStore(Context context,SharedPreferences prefs,AssetRepository assets){
-        this.context=context.getApplicationContext();this.prefs=prefs;this.assets=assets;
+        this(context,prefs,assets,false);
+    }
+    public IconStore(Context context,SharedPreferences prefs,AssetRepository assets,boolean exp2){
+        this.context=context.getApplicationContext();this.prefs=prefs;this.assets=assets;this.exp2=exp2;
+        if(exp2)try(InputStream input=this.context.getAssets().open("exp2_custom/mapping.json");
+            BufferedReader reader=new BufferedReader(new InputStreamReader(input,"UTF-8"))){
+            StringBuilder json=new StringBuilder();String line;
+            while((line=reader.readLine())!=null)json.append(line);
+            exp2Defaults=new JSONObject(json.toString());
+        }catch(Exception ignored){exp2Defaults=null;}
     }
     public void set(String key,Uri uri){prefs.edit().putString("icon_"+key,uri.toString()).apply();custom.remove(key);}
     public void reset(String key){prefs.edit().remove("icon_"+key).apply();custom.remove(key);}
     public Drawable icon(MenuModel.Entry entry){
         Bitmap image=custom(entry.key);
+        if(image==null&&exp2)image=bundled(entry.key);
         if(image==null)image=assets.getManualIcon(semantic(entry));
         if(image!=null)return new BitmapDrawable(context.getResources(),image);
         if(entry.packageName!=null){
@@ -48,6 +66,23 @@ public final class IconStore {
             if(bitmap!=null){custom.put(key,bitmap);return bitmap;}
         }catch(Exception ignored){}
         return null;
+    }
+    private Bitmap bundled(String key){
+        if(exp2Defaults==null)return null;
+        String file=exp2Defaults.optString(key,"");if(file.isEmpty())return null;
+        Bitmap cached=bundled.get(file);if(cached!=null)return cached;
+        try(InputStream in=context.getAssets().open("exp2_custom/"+file)){
+            BitmapFactory.Options probe=new BitmapFactory.Options();probe.inJustDecodeBounds=true;
+            BitmapFactory.decodeStream(in,null,probe);
+            BitmapFactory.Options options=new BitmapFactory.Options();options.inPreferredConfig=Bitmap.Config.ARGB_8888;
+            options.inSampleSize=1;
+            while(probe.outWidth/options.inSampleSize>256||probe.outHeight/options.inSampleSize>256)options.inSampleSize*=2;
+            try(InputStream image=context.getAssets().open("exp2_custom/"+file)){
+                Bitmap bitmap=BitmapFactory.decodeStream(image,null,options);
+                if(bitmap!=null)bundled.put(file,bitmap);
+                return bitmap;
+            }
+        }catch(Exception ignored){return null;}
     }
     private String semantic(MenuModel.Entry e){
         if(e.folder())return "files";

@@ -83,6 +83,7 @@ public final class LauncherActivity extends Activity {
     private static final int PICK_ICON=101, PICK_WALLPAPER=102, PICK_WIDGET=103, BIND_WIDGET=104, CONFIG_WIDGET=105;
     private static final int READ_WALLPAPER=106;
     private SharedPreferences prefs;
+    private SharedPreferences exp2Prefs;
     private MenuModel menu;
     private AssetRepository assets;
     private HomeWorkspaceModel workspaceModel;
@@ -95,6 +96,7 @@ public final class LauncherActivity extends Activity {
     private ScrollView widgetScroller;
     private WorkspacePager workspacePager;
     private int workspacePage;
+    private int homeDragOriginPage;
     private String activeDragKey;
     private View activeDragView;
     private Runnable edgeTurn;
@@ -108,6 +110,7 @@ public final class LauncherActivity extends Activity {
     private boolean drawerDragActive,drawerCrossedEdge,drawerDragMoved;
     private float drawerDragStartX,drawerDragStartY;
     private int drawerEdge,drawerHoverIndex=-1,drawerDropIndex;
+    private String exp2DropIconKey;
     private boolean drawerEdgeLatched;
     private Runnable drawerEdgeTurn;
     private DrawerPager pager;
@@ -157,8 +160,9 @@ public final class LauncherActivity extends Activity {
     @Override protected void onCreate(Bundle state){
         super.onCreate(state);
         prefs=getSharedPreferences("nokia_experience",MODE_PRIVATE);
-        menu=new MenuModel(this,prefs);workspaceModel=new HomeWorkspaceModel(prefs);
-        assets=new AssetRepository(this);icons=new IconStore(this,prefs,assets);
+        exp2Prefs=getSharedPreferences("nokia_exp_2",MODE_PRIVATE);
+        seedExp2Profile();
+        assets=new AssetRepository(this);loadProfileData();
         resolver=new AndroidActionResolver(this);device=new DeviceStateAdapters();sounds=new NokiaSounds(this,prefs);
         widgetHost=new AppWidgetHost(this,5530);widgetManager=AppWidgetManager.getInstance(this);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER);
@@ -187,7 +191,29 @@ public final class LauncherActivity extends Activity {
     private int dp(float value){return Math.round(value*getResources().getDisplayMetrics().density);}
     private String interfaceStyle(){
         String style=prefs.getString("style","exp");
-        return style.equals("n95")||style.equals("5530")?style:"exp";
+        return style.equals("n95")||style.equals("5530")||style.equals("exp2")?style:"exp";
+    }
+    private boolean exp2(){return interfaceStyle().equals("exp2");}
+    private SharedPreferences profilePrefs(){return exp2()?exp2Prefs:prefs;}
+    private void seedExp2Profile(){
+        if(exp2Prefs.getBoolean("initialized",false))return;
+        SharedPreferences.Editor copy=exp2Prefs.edit()
+            .putString("menu_state",prefs.getString("menu_state","{}"))
+            .putString("home_workspace",prefs.getString("home_workspace","{}"))
+            .putString("widgets",prefs.getString("widgets",""));
+        String widgets=prefs.getString("widgets","");
+        if(!widgets.isEmpty())for(String id:widgets.split(","))try{
+            int widgetId=Integer.parseInt(id);
+            copy.putInt("widget_page_"+id,prefs.getInt("widget_page_"+widgetId,0));
+            copy.putInt("widget_width_"+id,prefs.getInt("widget_width_"+widgetId,-1));
+            copy.putInt("widget_height_"+id,prefs.getInt("widget_height_"+widgetId,180));
+        }catch(NumberFormatException ignored){}
+        copy.putBoolean("initialized",true).apply();
+    }
+    private void loadProfileData(){
+        SharedPreferences data=profilePrefs();
+        menu=new MenuModel(this,data);workspaceModel=new HomeWorkspaceModel(data);
+        icons=new IconStore(this,data,assets,exp2());
     }
     private int accent(){
         if(interfaceStyle().equals("n95"))return 0xFF338BEB;
@@ -339,12 +365,17 @@ public final class LauncherActivity extends Activity {
         workspaceStrip.removeAllViews();
         int width=workspacePager.getWidth(),height=workspacePager.getHeight();
         // Keep one empty destination page available during a continuous edge drag.
-        int pages=Math.max(2,workspaceModel.pageCount()+1);workspacePage=Math.min(workspacePage,pages-1);
+        int pages=Math.max(2,(exp2()?homePageCount():workspaceModel.pageCount())+1);workspacePage=Math.min(workspacePage,pages-1);
         int cellWidth=width/HomeWorkspaceModel.COLUMNS,cellHeight=height/HomeWorkspaceModel.ROWS;
         for(int page=0;page<pages;page++){
             final int pageIndex=page;
             FrameLayout surface=new FrameLayout(this);
             workspaceStrip.addView(surface,new LinearLayout.LayoutParams(width,height));
+            if(exp2()&&page==pages-1){
+                TextView nextPage=label("+",34,0x99FFFFFF);
+                nextPage.setContentDescription("Новый рабочий стол при отпускании иконки");
+                surface.addView(nextPage,new FrameLayout.LayoutParams(-1,-1));
+            }
             surface.setOnTouchListener(this::emptyHomeTouch);
             surface.setOnDragListener((v,event)->{
                 if(event.getAction()==DragEvent.ACTION_DRAG_STARTED)return event.getLocalState() instanceof String;
@@ -421,7 +452,8 @@ public final class LauncherActivity extends Activity {
         @Override public void fling(int velocityX){flung=true;settleWorkspace(workspacePage+(velocityX>0?1:-1));}
     }
     private void settleWorkspace(int page){
-        workspacePage=Math.max(0,Math.min(page,Math.max(0,workspaceStrip.getChildCount()-1)));
+        int last=exp2()&&activeDragKey==null?homePageCount()-1:workspaceStrip.getChildCount()-1;
+        workspacePage=Math.max(0,Math.min(page,Math.max(0,last)));
         workspacePager.smoothScrollTo(workspacePage*workspacePager.getWidth(),0);
         updateVisibleWidgets();
     }
@@ -495,7 +527,11 @@ public final class LauncherActivity extends Activity {
         Log.d("NokiaDrag","ended result="+event.getResult()+" edge="+crossedHomeEdge+" page="+workspacePage+" key="+activeDragKey);
         String held=activeDragKey;
         boolean showContext=held!=null&&!drawerDragActive&&!event.getResult()&&!homeDragMoved&&!crossedHomeEdge;
-        if(activeDragKey!=null&&!event.getResult()&&crossedHomeEdge){
+        if(exp2()&&activeDragKey!=null&&!event.getResult()&&crossedHomeEdge&&!drawerDragActive){
+            workspacePage=homeDragOriginPage;
+            workspacePager.smoothScrollTo(workspacePage*workspacePager.getWidth(),0);
+            updateVisibleWidgets();
+        }else if(activeDragKey!=null&&!event.getResult()&&crossedHomeEdge){
             if(activeDragKey.startsWith("widget:"))moveWidgetToPage(activeDragKey,workspacePage);
             else{workspaceModel.reorder(activeDragKey,workspacePage,edgeDropCell);refreshWorkspace();}
         }
@@ -506,9 +542,17 @@ public final class LauncherActivity extends Activity {
         finishWorkspaceDrag();drawerOpen=false;drawer.setVisibility(View.GONE);updateSystemStatusBar();refreshWorkspace();
     }
     private void moveWidgetToPage(String source,int page){
-        try{prefs.edit().putInt("widget_page_"+Integer.parseInt(source.substring(7)),page).apply();
-            workspacePage=page;updateVisibleWidgets();}
+        try{profilePrefs().edit().putInt("widget_page_"+Integer.parseInt(source.substring(7)),page).apply();
+            workspacePage=page;updateVisibleWidgets();if(exp2())refreshWorkspace();}
         catch(NumberFormatException ignored){}
+    }
+    private int homePageCount(){
+        int count=workspaceModel.pageCount();
+        for(String id:profilePrefs().getString("widgets","").split(",")){
+            try{count=Math.max(count,profilePrefs().getInt("widget_page_"+Integer.parseInt(id),0)+1);}
+            catch(NumberFormatException ignored){}
+        }
+        return Math.max(1,count);
     }
     private void updateVisibleWidgets(){
         if(widgetColumn==null)return;
@@ -516,7 +560,7 @@ public final class LauncherActivity extends Activity {
         for(int i=0;i<widgetColumn.getChildCount();i++){
             View child=widgetColumn.getChildAt(i);
             if(child instanceof WidgetFrame){
-                boolean visible=prefs.getInt("widget_page_"+((WidgetFrame)child).widgetId,0)==workspacePage;
+                boolean visible=profilePrefs().getInt("widget_page_"+((WidgetFrame)child).widgetId,0)==workspacePage;
                 child.setVisibility(visible?View.VISIBLE:View.GONE);any|=visible;
             }
         }
@@ -552,6 +596,7 @@ public final class LauncherActivity extends Activity {
     }
     private void startAppDrag(View view,String key){
         activeDragKey=key;activeDragView=view;crossedHomeEdge=false;homeDragMoved=false;
+        homeDragOriginPage=workspacePage;
         drawerDragActive=drawerOpen;drawerCrossedEdge=false;drawerDragMoved=false;
         int[] origin=new int[2];view.getLocationOnScreen(origin);
         drawerDragStartX=origin[0]+view.getWidth()/2f;drawerDragStartY=origin[1]+view.getHeight()/2f;
@@ -719,19 +764,41 @@ public final class LauncherActivity extends Activity {
         return Math.min(drawerEntries.size()-1,currentPage*perPage+row*3+column);
     }
     private boolean drawerDropOnIcon(View target,DragEvent event){
+        exp2DropIconKey=null;
+        if(exp2()){
+            exp2DropIconKey=exp2CenteredDrawerIcon(target,event);
+            return exp2DropIconKey!=null;
+        }
         int[] where=new int[2],pagerWhere=new int[2];target.getLocationOnScreen(where);pager.getLocationOnScreen(pagerWhere);
         float x=where[0]+event.getX()-pagerWhere[0],y=where[1]+event.getY()-pagerWhere[1];
         float cellWidth=Math.max(1f,pager.getWidth()/3f),cellHeight=Math.max(1f,pager.getHeight()/(float)prefs.getInt("drawer_rows",6));
         float fractionX=(x%cellWidth)/cellWidth,fractionY=(y%cellHeight)/cellHeight;
         return fractionX>0.22f&&fractionX<0.78f&&fractionY>0.15f&&fractionY<0.78f;
     }
+    private String exp2CenteredDrawerIcon(View target,DragEvent event){
+        if(drawerEntries.isEmpty())return null;
+        int[] where=new int[2],pagerWhere=new int[2];
+        target.getLocationOnScreen(where);pager.getLocationOnScreen(pagerWhere);
+        float x=where[0]+event.getX()-pagerWhere[0],y=where[1]+event.getY()-pagerWhere[1];
+        int rows=prefs.getInt("drawer_rows",6),perPage=3*rows;
+        float width=pager.getWidth()/3f,height=pager.getHeight()/(float)rows;
+        int column=(int)(x/Math.max(1f,width)),row=(int)(y/Math.max(1f,height));
+        if(column<0||column>=3||row<0||row>=rows)return null;
+        float fractionX=(x-column*width)/Math.max(1f,width);
+        float fractionY=(y-row*height)/Math.max(1f,height);
+        if(fractionX<0.29f||fractionX>0.71f||fractionY<0.13f||fractionY>0.65f)return null;
+        int index=currentPage*perPage+row*3+column;
+        return index<drawerEntries.size()?drawerEntries.get(index).key:null;
+    }
     private void applyDrawerDrop(String source,int index,boolean onIcon){
         if(index<0||index>=drawerEntries.size()||source.startsWith("widget:"))return;
         MenuModel.Entry target=drawerEntries.get(index);
+        if(exp2()&&onIcon&&exp2DropIconKey!=null)
+            for(MenuModel.Entry entry:drawerEntries)if(entry.key.equals(exp2DropIconKey)){target=entry;break;}
         if(source.equals(target.key)){
             boolean context=!drawerDragMoved;View held=activeDragView;
             finishDrawerDrag();
-            if(context&&held!=null)held.post(()->edit(target,held));
+            if(context&&held!=null){MenuModel.Entry selected=target;held.post(()->edit(selected,held));}
             return;
         }
         if(onIcon&&target.key.startsWith("userfolder:")&&source.startsWith("installed:"))
@@ -762,6 +829,14 @@ public final class LauncherActivity extends Activity {
             handler.postDelayed(drawerEdgeTurn,380);
         }
         int index=drawerIndexAt(target,event);
+        if(exp2()){
+            String hovered=exp2CenteredDrawerIcon(target,event);
+            if(hovered!=null&&!hovered.equals(activeDragKey)){
+                drawerDropIndex=index;
+                if(drawerHoverIndex!=-1)clearDrawerPreview();
+                return;
+            }
+        }
         if(index!=drawerHoverIndex){drawerHoverIndex=index;drawerDropIndex=index;previewDrawerReorder(index);}
     }
     private void previewDrawerReorder(int targetIndex){
@@ -1031,6 +1106,7 @@ public final class LauncherActivity extends Activity {
         private final Paint notificationPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Bitmap signalSegment,batterySegment,signalMark,batteryMark;
         private final Path messageGlyph=new Path(),missedGlyph=new Path(),bluetoothGlyph=new Path(),headsetGlyph=new Path();
+        private final RectF[] notificationBounds={new RectF(),new RectF(),new RectF(),new RectF()};
         StatusGlyph(Context c){
             super(c);setContentDescription("Nokia: время, дата, сеть, Wi-Fi и батарея");
             signalSegment=sprite("signal_segment");batterySegment=sprite("battery_segment");
@@ -1053,6 +1129,11 @@ public final class LauncherActivity extends Activity {
             headsetGlyph.moveTo(2.5f,9.5f);headsetGlyph.lineTo(2.5f,7.5f);
             headsetGlyph.cubicTo(2.5f,0.5f,13.5f,0.5f,13.5f,7.5f);
             headsetGlyph.lineTo(13.5f,9.5f);
+            messageGlyph.computeBounds(notificationBounds[0],true);
+            missedGlyph.computeBounds(notificationBounds[1],true);
+            bluetoothGlyph.computeBounds(notificationBounds[2],true);
+            headsetGlyph.computeBounds(notificationBounds[3],true);
+            notificationBounds[3].union(1f,13f);notificationBounds[3].union(15f,13f);
             notificationPaint.setColor(Color.WHITE);
             notificationPaint.setStrokeCap(Paint.Cap.ROUND);
             notificationPaint.setStrokeJoin(Paint.Join.ROUND);
@@ -1065,8 +1146,17 @@ public final class LauncherActivity extends Activity {
             if(image!=null)canvas.drawBitmap(image,null,new RectF(left,top,left+width,top+height),p);
         }
         private void drawNotification(Canvas canvas,Path glyph,int kind,float left){
-            canvas.save();canvas.translate(left,dp(3));
-            float scale=dp(15)/16f;canvas.scale(scale,scale);
+            canvas.save();
+            if(exp2()){
+                RectF bounds=notificationBounds[kind];
+                float scale=Math.min(dp(15)/Math.max(1f,bounds.width()),dp(12)/Math.max(1f,bounds.height()));
+                canvas.translate(left+(dp(15)-bounds.width()*scale)/2f-bounds.left*scale,
+                    dp(17)-bounds.bottom*scale);
+                canvas.scale(scale,scale);
+            }else{
+                canvas.translate(left,dp(3));
+                float scale=dp(15)/16f;canvas.scale(scale,scale);
+            }
             notificationPaint.setStyle(Paint.Style.STROKE);
             notificationPaint.setStrokeWidth(kind==1?2.2f:1.7f);
             canvas.drawPath(glyph,notificationPaint);
@@ -1272,14 +1362,18 @@ public final class LauncherActivity extends Activity {
         current[0]=showSettingsDialog(builder);
     }
     private String interfaceStyleLabel(){
-        switch(interfaceStyle()){case "n95":return "N95";case "5530":return "5530";default:return "Nokia Exp";}
+        switch(interfaceStyle()){case "n95":return "N95";case "5530":return "5530";
+            case "exp2":return "Nokia Exp 2";default:return "Nokia Exp";}
     }
     private void chooseStyle(){
-        String[] styles={"N95","5530","Nokia Exp"};String[] values={"n95","5530","exp"};
+        String[] styles={"N95","5530","Nokia Exp","Nokia Exp 2"};
+        String[] values={"n95","5530","exp","exp2"};
         int selected=Arrays.asList(values).indexOf(interfaceStyle());
         showSettingsDialog(new AlertDialog.Builder(this).setTitle("Interface Style")
             .setSingleChoiceItems(styles,Math.max(0,selected),(d,n)->{
                 prefs.edit().putString("style",values[n]).apply();d.dismiss();
+                loadProfileData();folderId=null;currentPage=0;workspacePage=0;
+                restoreWidgets();drawerDirty=true;
                 applyWindowTransparency();buildDock();refreshGrid();refreshWorkspace();
                 showAppearanceSettings();
             }).setNegativeButton("‹ Назад",(d,w)->showAppearanceSettings()));
@@ -1336,7 +1430,7 @@ public final class LauncherActivity extends Activity {
         TextView title=drawerShell==null?null:drawerShell.findViewWithTag("drawerTitle");
         if(title!=null)title.setTextColor(accent()==Color.WHITE?Color.WHITE:accent());
         if(widgetColumn!=null)for(int i=0;i<widgetColumn.getChildCount();i++)
-            widgetColumn.getChildAt(i).setBackground(background(panel(),10));
+            widgetColumn.getChildAt(i).setBackground(exp2()?new ColorDrawable(Color.TRANSPARENT):background(panel(),10));
         updateDrawerBackground();
     }
     private void chooseStartup(){
@@ -1434,20 +1528,23 @@ public final class LauncherActivity extends Activity {
     private void restoreWidgets(){
         if(widgetColumn==null)return;widgetColumn.removeAllViews();
         editingWidget=null;
-        String value=prefs.getString("widgets","");
+        String value=profilePrefs().getString("widgets","");
         if(!value.isEmpty())for(String item:value.split(","))try{attachWidget(Integer.parseInt(item));}catch(Exception ignored){}
         updateVisibleWidgets();
     }
     private void attachWidget(int id){
         AppWidgetProviderInfo info=widgetManager.getAppWidgetInfo(id);if(info==null)return;
         AppWidgetHostView view=widgetHost.createView(this,id,info);view.setAppWidget(id,info);
-        int height=Math.max(100,prefs.getInt("widget_height_"+id,180));
-        int width=prefs.getInt("widget_width_"+id,-1);
-        WidgetFrame wrapper=new WidgetFrame(this,id,info);wrapper.setBackground(background(panel(),10));
+        int height=Math.max(100,profilePrefs().getInt("widget_height_"+id,180));
+        int width=profilePrefs().getInt("widget_width_"+id,-1);
+        WidgetFrame wrapper=new WidgetFrame(this,id,info);
+        wrapper.setBackground(exp2()?new ColorDrawable(Color.TRANSPARENT):background(panel(),10));
         wrapper.addView(view,new FrameLayout.LayoutParams(-1,-1));
         LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(width<0?-1:dp(width),dp(height));lp.bottomMargin=dp(8);
         widgetColumn.addView(wrapper,lp);
         wrapper.setOnDragListener((v,event)->{
+            if(event.getAction()==DragEvent.ACTION_DRAG_ENDED&&activeDragView==wrapper)
+                endWorkspaceDrag(event);
             if(event.getAction()==DragEvent.ACTION_DROP){
                 String source=String.valueOf(event.getLocalState());
                 if(source.startsWith("widget:")&&!source.equals("widget:"+id)){moveWidgetBefore(source,"widget:"+id);return true;}
@@ -1464,10 +1561,13 @@ public final class LauncherActivity extends Activity {
                 downX=event.getX();downY=event.getY();editingGesture=false;cancelPending();
                 pending=()->{
                     pending=null;editingGesture=true;
-                    MotionEvent cancel=MotionEvent.obtain(SystemClock.uptimeMillis(),SystemClock.uptimeMillis(),
-                        MotionEvent.ACTION_CANCEL,downX,downY,0);
-                    WidgetFrame.super.dispatchTouchEvent(cancel);cancel.recycle();
+                    if(!exp2()){
+                        MotionEvent cancel=MotionEvent.obtain(SystemClock.uptimeMillis(),SystemClock.uptimeMillis(),
+                            MotionEvent.ACTION_CANCEL,downX,downY,0);
+                        WidgetFrame.super.dispatchTouchEvent(cancel);cancel.recycle();
+                    }
                     showWidgetHandles(this);
+                    if(exp2())startWidgetDrag(this);
                 };
                 handler.postDelayed(pending,ViewConfiguration.getLongPressTimeout());
             }else if(event.getAction()==MotionEvent.ACTION_MOVE){
@@ -1482,7 +1582,9 @@ public final class LauncherActivity extends Activity {
     private void showWidgetHandles(WidgetFrame wrapper){
         if(editingWidget!=null&&editingWidget!=wrapper)hideWidgetHandles(editingWidget);
         editingWidget=wrapper;
-        GradientDrawable border=background(panel(),10);border.setStroke(dp(2),accent());wrapper.setBackground(border);
+        GradientDrawable border=background(exp2()?Color.TRANSPARENT:panel(),10);
+        border.setStroke(dp(exp2()?1:2),exp2()?0xCCFFFFFF:accent());
+        if(exp2())wrapper.setForeground(border);else wrapper.setBackground(border);
         View old=wrapper.findViewWithTag("widgetHandles");if(old!=null)wrapper.removeView(old);
         LinearLayout tools=new LinearLayout(this);tools.setTag("widgetHandles");tools.setGravity(Gravity.RIGHT|Gravity.CENTER_VERTICAL);
         tools.setBackground(background(panel(),8));
@@ -1490,10 +1592,7 @@ public final class LauncherActivity extends Activity {
         move.setContentDescription("Переместить виджет");
         move.setOnTouchListener((v,event)->{
             if(event.getAction()==MotionEvent.ACTION_DOWN){
-                String key="widget:"+wrapper.widgetId;
-                activeDragKey=key;activeDragView=wrapper;
-                if(wrapper.startDragAndDrop(android.content.ClipData.newPlainText("widget",key),
-                    new View.DragShadowBuilder(wrapper),key,0))wrapper.animate().alpha(0.3f).setDuration(90).start();
+                startWidgetDrag(wrapper);
                 return true;
             }
             return true;
@@ -1519,7 +1618,7 @@ public final class LauncherActivity extends Activity {
                         if(event.getAction()==MotionEvent.ACTION_UP){
                             int widthDp=Math.round((lp.width<0?wrapper.getWidth():lp.width)/getResources().getDisplayMetrics().density);
                             int heightDp=Math.round(lp.height/getResources().getDisplayMetrics().density);
-                            prefs.edit().putInt("widget_width_"+wrapper.widgetId,widthDp)
+                            profilePrefs().edit().putInt("widget_width_"+wrapper.widgetId,widthDp)
                                 .putInt("widget_height_"+wrapper.widgetId,heightDp).apply();
                             Bundle options=new Bundle();options.putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH,widthDp);
                             options.putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH,widthDp);
@@ -1541,26 +1640,39 @@ public final class LauncherActivity extends Activity {
         wrapper.addView(tools,controls);
         wrapper.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
     }
+    private void startWidgetDrag(WidgetFrame wrapper){
+        String key="widget:"+wrapper.widgetId;
+        activeDragKey=key;activeDragView=wrapper;
+        homeDragOriginPage=workspacePage;crossedHomeEdge=false;homeDragMoved=false;
+        boolean started=wrapper.startDragAndDrop(android.content.ClipData.newPlainText("widget",key),
+            new View.DragShadowBuilder(wrapper),key,0);
+        if(started)wrapper.animate().alpha(0.3f).setDuration(90).start();
+    }
     private void hideWidgetHandles(WidgetFrame wrapper){
         if(wrapper==null)return;
         View controls=wrapper.findViewWithTag("widgetHandles");if(controls!=null)wrapper.removeView(controls);
-        wrapper.setBackground(background(panel(),10));if(editingWidget==wrapper)editingWidget=null;
+        if(exp2())wrapper.setForeground(null);
+        wrapper.setBackground(exp2()?new ColorDrawable(Color.TRANSPARENT):background(panel(),10));
+        if(editingWidget==wrapper)editingWidget=null;
     }
     private void moveWidgetBefore(String source,String target){
-        ArrayList<String> ids=new ArrayList<>(Arrays.asList(prefs.getString("widgets","").split(",")));
+        ArrayList<String> ids=new ArrayList<>(Arrays.asList(profilePrefs().getString("widgets","").split(",")));
         String id=source.substring("widget:".length());if(!ids.remove(id))return;
         int index=target==null?ids.size():ids.indexOf(target.substring("widget:".length()));
         ids.add(index<0?ids.size():index,id);
-        prefs.edit().putString("widgets",TextUtils.join(",",ids)).apply();restoreWidgets();
+        profilePrefs().edit().putString("widgets",TextUtils.join(",",ids)).apply();restoreWidgets();
     }
     private void saveWidget(int id){
-        String old=prefs.getString("widgets","");prefs.edit().putString("widgets",old.isEmpty()?""+id:old+","+id).apply();restoreWidgets();
+        String old=profilePrefs().getString("widgets","");profilePrefs().edit().putString("widgets",old.isEmpty()?""+id:old+","+id).apply();restoreWidgets();
     }
     private void removeWidget(int id){
-        ArrayList<String> all=new ArrayList<>(Arrays.asList(prefs.getString("widgets","").split(",")));
-        all.remove(String.valueOf(id));prefs.edit().putString("widgets",TextUtils.join(",",all))
+        ArrayList<String> all=new ArrayList<>(Arrays.asList(profilePrefs().getString("widgets","").split(",")));
+        all.remove(String.valueOf(id));profilePrefs().edit().putString("widgets",TextUtils.join(",",all))
             .remove("widget_width_"+id).remove("widget_height_"+id).apply();
-        try{widgetHost.deleteAppWidgetId(id);}catch(Exception ignored){}restoreWidgets();
+        SharedPreferences other=exp2()?prefs:exp2Prefs;
+        if(!Arrays.asList(other.getString("widgets","").split(",")).contains(String.valueOf(id)))
+            try{widgetHost.deleteAppWidgetId(id);}catch(Exception ignored){}
+        restoreWidgets();
     }
     @Override protected void onActivityResult(int request,int result,Intent data){
         super.onActivityResult(request,result,data);
