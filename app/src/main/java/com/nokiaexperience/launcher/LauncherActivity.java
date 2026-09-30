@@ -162,6 +162,9 @@ public final class LauncherActivity extends Activity {
         prefs=getSharedPreferences("nokia_experience",MODE_PRIVATE);
         exp2Prefs=getSharedPreferences("nokia_exp_2",MODE_PRIVATE);
         seedExp2Profile();
+        String savedStyle=prefs.getString("style","exp2");
+        if(!savedStyle.equals("exp2")&&!savedStyle.equals("n95")&&!savedStyle.equals("5530"))
+            prefs.edit().putString("style","exp2").apply();
         assets=new AssetRepository(this);loadProfileData();
         resolver=new AndroidActionResolver(this);device=new DeviceStateAdapters();sounds=new NokiaSounds(this,prefs);
         widgetHost=new AppWidgetHost(this,5530);widgetManager=AppWidgetManager.getInstance(this);
@@ -190,8 +193,8 @@ public final class LauncherActivity extends Activity {
     }
     private int dp(float value){return Math.round(value*getResources().getDisplayMetrics().density);}
     private String interfaceStyle(){
-        String style=prefs.getString("style","exp");
-        return style.equals("n95")||style.equals("5530")||style.equals("exp2")?style:"exp";
+        String style=prefs.getString("style","exp2");
+        return style.equals("n95")||style.equals("5530")?style:"exp2";
     }
     private boolean exp2(){return interfaceStyle().equals("exp2");}
     private SharedPreferences profilePrefs(){return exp2()?exp2Prefs:prefs;}
@@ -1379,11 +1382,11 @@ public final class LauncherActivity extends Activity {
     }
     private String interfaceStyleLabel(){
         switch(interfaceStyle()){case "n95":return "N95";case "5530":return "5530";
-            case "exp2":return "Nokia Exp 2";default:return "Nokia Exp";}
+            default:return "Nokia Exp 2";}
     }
     private void chooseStyle(){
-        String[] styles={"N95","5530","Nokia Exp","Nokia Exp 2"};
-        String[] values={"n95","5530","exp","exp2"};
+        String[] styles={"Nokia Exp 2","N95","5530"};
+        String[] values={"exp2","n95","5530"};
         int selected=Arrays.asList(values).indexOf(interfaceStyle());
         showSettingsDialog(new AlertDialog.Builder(this).setTitle("Interface Style")
             .setSingleChoiceItems(styles,Math.max(0,selected),(d,n)->{
