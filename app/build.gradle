@@ -1,0 +1,25 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.nokiaexperience.launcher'
+    compileSdk 37
+
+    androidResources { noCompress += ['mp3', 'wav'] }
+
+    defaultConfig {
+        applicationId 'com.nokiaexperience.launcher'
+        minSdk 26
+        targetSdk 28
+        versionCode 1
+        versionName '0.1-mvp'
+    }
+
+    buildTypes {
+        release { minifyEnabled false }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

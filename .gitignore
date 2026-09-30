@@ -1,0 +1,8 @@
+/.gradle/
+/app/build/
+/build/
+/outputs/
+/work/
+/ASSET_PREVIEW/
+/.idea/
+*.iml
