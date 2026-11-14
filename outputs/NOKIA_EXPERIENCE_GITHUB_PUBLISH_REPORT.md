@@ -56,3 +56,12 @@ SVG/vector resources intended as project assets remain included where they are p
 - Remote ref was created without force push.
 
 The report itself is added immediately after the primary publication commit and is pushed as a follow-up documentation commit. The primary implementation/publication hash remains `47eab42`.
+
+## README bilingual preview update
+
+- README now contains complete Russian and English sections with language navigation at the top.
+- Preview image: `docs/images/nokia-experience-preview.png`.
+- Source: the latest quality Nokia B pairwise device-capture from `outputs/samsung-behavioral-research/pairwise/`; it is a real Launcher screenshot, not a Studio Canvas mockup.
+- Image dimensions: 1080×1920.
+- Relative image/link targets were checked locally and resolve successfully.
+- No device serial, local username or private path is exposed in the README or preview path.
