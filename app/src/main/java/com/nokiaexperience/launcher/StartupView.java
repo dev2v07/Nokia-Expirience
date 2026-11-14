@@ -26,12 +26,15 @@ public final class StartupView extends View {
     private Bitmap current;
     private int frame=-1;
     private boolean finishing;
+    private boolean holdLastFrame;
+    private boolean framesComplete;
+    private boolean audioComplete;
     private final long start=System.currentTimeMillis();
     private final Runnable tick=new Runnable(){
         public void run(){
             if(finishing)return;
             frame++;
-            if(frame>=20){finish();return;}
+            if(frame>=20){frame=19;framesComplete=true;invalidate();if(!holdLastFrame||audioComplete)finish();return;}
             loadFrame(frame);invalidate();handler.postDelayed(this,frameMs);
         }
     };
@@ -39,6 +42,8 @@ public final class StartupView extends View {
         super(context);this.frameMs=frameMs;this.onFinishing=onFinishing;this.complete=complete;
         handler.post(tick);
     }
+    public void setHoldLastFrame(boolean hold){holdLastFrame=hold;}
+    public void audioFinished(){audioComplete=true;if(framesComplete)finish();}
     private void loadFrame(int index){
         if(current!=null){current.recycle();current=null;}
         String name=String.format(java.util.Locale.US,"n95/Startup_%03d.png",index);

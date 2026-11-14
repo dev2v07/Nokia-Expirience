@@ -19,6 +19,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".workspace.engine.prototype.PrototypeActivity" android:exported="true" android:label="Workspace Engine Prototype">
+            <intent-filter>
+                <action android:name="com.nokiaexperience.launcher.action.OPEN_WORKSPACE_ENGINE_PROTOTYPE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <service android:name=".NokiaNotificationListener" android:label="Nokia Experience notifications" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="true">
             <intent-filter><action android:name="android.service.notification.NotificationListenerService" /></intent-filter>
         </service>

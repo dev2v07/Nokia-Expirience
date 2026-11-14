@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "name": "Nokia Experience 2",
+  "device": {
+    "model": "SM-A520F",
+    "width": 1080,
+    "height": 1920,
+    "density": 420,
+    "api": 26,
+    "serial": ""
+  },
+  "screens": {},
+  "theme": {
+    "name": "Nokia Glass",
+    "accent": "#208FFF",
+    "statusIconColor": "#FFFFFF",
+    "glassOpacity": 0.35,
+    "blurRadius": 12,
+    "borderOpacity": 0.65,
+    "cornerRadius": 15,
+    "glowIntensity": 0.2
+  },
+  "grids": {
+    "home": {
+      "columns": 4,
+      "rows": 3,
+      "widgetSlots": 2,
+      "dockSeparate": true
+    }
+  },
+  "assets": {
+    "wallpaper": "",
+    "icons": {}
+  },
+  "export": {
+    "managedAsset": "studio/project.json",
+    "statusIconColor": true,
+    "themeAccent": true
+  }
+}

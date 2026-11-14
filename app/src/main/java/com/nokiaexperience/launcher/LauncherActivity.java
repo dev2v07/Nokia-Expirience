@@ -2,6 +2,8 @@ package com.nokiaexperience.launcher;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.AlarmManager;
+import android.app.NotificationManager;
 import android.app.KeyguardManager;
 import android.app.WallpaperManager;
 import android.appwidget.AppWidgetHost;
@@ -30,6 +32,7 @@ import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
@@ -39,15 +42,19 @@ import android.net.NetworkInfo;
 import android.net.Uri;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.nfc.NfcAdapter;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.telephony.PhoneStateListener;
 import android.telephony.SignalStrength;
 import android.telephony.ServiceState;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Log;
@@ -57,6 +64,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewConfiguration;
+import android.view.VelocityTracker;
 import android.view.WindowManager;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
@@ -74,6 +82,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -92,9 +101,14 @@ public final class LauncherActivity extends Activity {
     private DeviceStateAdapters device;
     private NokiaSounds sounds;
     private FrameLayout root,home,drawer;
+    private FrameLayout exp2EditOverlay;
+    private LinearLayout exp2EditPreviewRow;
+    private TextView exp2EditIndicator;
+    private boolean exp2EditMode;
     private LinearLayout widgetColumn,dock,drawerShell,homeContent,workspaceStrip;
     private ScrollView widgetScroller;
     private WorkspacePager workspacePager;
+    private Exp2HomeDragEngine exp2HomeDrag;
     private int workspacePage;
     private int homeDragOriginPage;
     private String activeDragKey;
@@ -124,6 +138,7 @@ public final class LauncherActivity extends Activity {
     private boolean serviceAvailable=true;
     private String statusTime="",statusDate="",statusOperator="";
     private boolean wifiEnabled,wifiConnected,bluetoothEnabled,bluetoothConnected,headsetConnected;
+    private boolean alarmSet,nfcEnabled,airplaneMode,powerSaveMode,doNotDisturb;
     private int wifiLevel=-1,notificationIndicators;
     private final PhoneStateListener signalListener=new PhoneStateListener(){
         @Override public void onSignalStrengthsChanged(SignalStrength signal){device.signalLevel=!serviceAvailable||signal==null?-1:signal.getLevel();if(statusGlyph!=null)statusGlyph.invalidate();}
@@ -132,7 +147,8 @@ public final class LauncherActivity extends Activity {
     private ImageView wallpaper;
     private StartupView startup;
     private MediaPlayer startupPlayer;
-    private boolean startupPending,drawerOpen,receiverRegistered;
+    private StudioRuntimeConfig studioRuntime;
+    private boolean startupPending,drawerOpen,receiverRegistered,startupAudioFinished;
     private boolean wallpaperFallback;
     private Drawable cachedDrawerSource;
     private Bitmap cachedDrawerBitmap;
@@ -142,9 +158,13 @@ public final class LauncherActivity extends Activity {
     private AppWidgetHost widgetHost;
     private AppWidgetManager widgetManager;
     private WidgetFrame editingWidget;
+    private final Map<Integer,Bitmap> exp2PageBitmapCache=new HashMap<>();
+    private Bitmap exp2BlurredBackdrop;
     private int pendingWidgetId=-1;
     private float swipeX,swipeY;
     private boolean swipeConsumed;
+    private boolean upperSwipeCandidate,upperSwipeConsumed;
+    private boolean exp2AddPageInProgress;
     private Runnable pendingHomeLongPress;
     private int touchSlop;
     private final BroadcastReceiver changes=new BroadcastReceiver(){
@@ -166,6 +186,7 @@ public final class LauncherActivity extends Activity {
         if(!savedStyle.equals("exp2")&&!savedStyle.equals("n95")&&!savedStyle.equals("5530"))
             prefs.edit().putString("style","exp2").apply();
         assets=new AssetRepository(this);loadProfileData();
+        studioRuntime=StudioRuntimeConfig.load(this);
         resolver=new AndroidActionResolver(this);device=new DeviceStateAdapters();sounds=new NokiaSounds(this,prefs);
         widgetHost=new AppWidgetHost(this,5530);widgetManager=AppWidgetManager.getInstance(this);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER);
@@ -185,10 +206,13 @@ public final class LauncherActivity extends Activity {
         touchSlop=ViewConfiguration.get(this).getScaledTouchSlop();
         root.setOnApplyWindowInsetsListener((v,insets)->{
             if(homeContent!=null)homeContent.setPadding(dp(12),drawerOpen||settingsVisible?insets.getSystemWindowInsetTop()+dp(3):dp(3),dp(12),insets.getSystemWindowInsetBottom()+dp(18));
-            if(drawerShell!=null)drawerShell.setPadding(dp(10),insets.getSystemWindowInsetTop()+dp(4),dp(10),insets.getSystemWindowInsetBottom()+dp(6));
+            if(drawerShell!=null)drawerShell.setPadding(dp(10),Math.max(insets.getSystemWindowInsetTop(),dp(58))+dp(4),dp(10),insets.getSystemWindowInsetBottom()+dp(6));
             return insets;
         });
-        applyOrientation();buildHome();buildDrawer();loadWallpaper();refresh();
+        applyOrientation();buildHome();buildDrawer();
+        // One shared Launcher status layer stays above Home, Drawer and Exp2 Edit Mode.
+        root.addView(statusGlyph,new FrameLayout.LayoutParams(-1,dp(58),Gravity.TOP));
+        loadWallpaper();refresh();
         startupPending=state==null && prefs.getBoolean("startup_animation",true);
     }
     private int dp(float value){return Math.round(value*getResources().getDisplayMetrics().density);}
@@ -244,6 +268,32 @@ public final class LauncherActivity extends Activity {
             default:return 0xFF208FFF;
         }
     }
+    private int statusIconColor(){
+        if(exp2() && studioRuntime!=null && studioRuntime.statusIconColor()!=Color.TRANSPARENT)
+            return studioRuntime.statusIconColor();
+        String value=profilePrefs().getString("status_icon_color","white");
+        if("accent".equals(value))return accent();
+        if("cyan".equals(value))return 0xFF8DEBFF;
+        if("yellow".equals(value))return 0xFFFFE58A;
+        return Color.WHITE;
+    }
+    private String statusIconColorLabel(){
+        String value=profilePrefs().getString("status_icon_color","white");
+        if("accent".equals(value))return "акцентный";
+        if("cyan".equals(value))return "голубой";
+        if("yellow".equals(value))return "жёлтый";
+        return "белый";
+    }
+    private void chooseStatusIconColor(){
+        String[] choices={"Белый","Акцентный цвет темы","Голубой","Жёлтый"};
+        String current=profilePrefs().getString("status_icon_color","white");
+        int selected="accent".equals(current)?1:"cyan".equals(current)?2:"yellow".equals(current)?3:0;
+        new AlertDialog.Builder(this).setTitle("Цвет иконок статус-бара").setSingleChoiceItems(choices,selected,(dialog,which)->{
+            String value=which==1?"accent":which==2?"cyan":which==3?"yellow":"white";
+            profilePrefs().edit().putString("status_icon_color",value).apply();
+            if(statusGlyph!=null)statusGlyph.invalidate();dialog.dismiss();showSettings();
+        }).setNegativeButton("Отмена",null).show();
+    }
     private int windowTransparency(){
         return windowTransparencyFrom(profilePrefs());
     }
@@ -290,10 +340,14 @@ public final class LauncherActivity extends Activity {
     }
     private int dockRadius(){return interfaceStyle().equals("n95")?5:interfaceStyle().equals("5530")?9:15;}
     private void updateSystemStatusBar(){
-        boolean homeFullscreen=!drawerOpen&&!settingsVisible;
-        getWindow().setStatusBarColor(homeFullscreen?Color.TRANSPARENT:0xFF10273D);
-        int flags=View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
-        if(homeFullscreen)flags|=View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+        // Launcher owns the single visual status layer (StatusGlyph).  Do not
+        // reveal Android's native status bar when Drawer/Edit/Settings opens:
+        // it would be drawn over the SVG glyphs at the same top inset.
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
+            WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        int flags=View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            |View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
         getWindow().getDecorView().setSystemUiVisibility(flags);
         if(root!=null)root.requestApplyInsets();
     }
@@ -328,12 +382,13 @@ public final class LauncherActivity extends Activity {
         LinearLayout content=new LinearLayout(this);homeContent=content;content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(12),dp(3),dp(12),dp(18));home.addView(content,new FrameLayout.LayoutParams(-1,-1));
         statusGlyph=new StatusGlyph(this);
-        content.addView(statusGlyph,new LinearLayout.LayoutParams(-1,dp(43)));
         statusGlyph.setOnClickListener(v->showStatusActions());
+        // Preserve the established Home geometry while the actual glyph is shared at root level.
+        content.addView(new View(this),new LinearLayout.LayoutParams(-1,dp(43)));
         LinearLayout mid=new LinearLayout(this);mid.setOrientation(LinearLayout.VERTICAL);
         content.addView(mid,new LinearLayout.LayoutParams(-1,0,1));
         widgetColumn=new LinearLayout(this);widgetColumn.setOrientation(LinearLayout.VERTICAL);
-        widgetScroller=new ScrollView(this);widgetScroller.setVerticalScrollBarEnabled(false);
+        widgetScroller=new WidgetScrollView(this);widgetScroller.setVerticalScrollBarEnabled(false);
         widgetScroller.setFillViewport(false);widgetScroller.addView(widgetColumn,new ScrollView.LayoutParams(-1,-2));
         mid.addView(widgetScroller,new LinearLayout.LayoutParams(-1,0,0.55f));
         widgetColumn.setOnDragListener((v,event)->{
@@ -348,10 +403,51 @@ public final class LauncherActivity extends Activity {
         workspaceStrip=new LinearLayout(this);workspaceStrip.setOrientation(LinearLayout.HORIZONTAL);
         workspacePager.addView(workspaceStrip,new HorizontalScrollView.LayoutParams(-2,-1));
         mid.addView(workspacePager,new LinearLayout.LayoutParams(-1,0,0.45f));
+        exp2HomeDrag=new Exp2HomeDragEngine(new Exp2HomeDragEngine.Host(){
+            @Override public int currentPage(){return workspacePage;}
+            @Override public int pageCount(){return workspaceStrip==null?1:workspaceStrip.getChildCount();}
+            @Override public int[] pageBoundsOnScreen(int page){
+                if(workspaceStrip==null||page<0||page>=workspaceStrip.getChildCount())return null;
+                View v=workspaceStrip.getChildAt(page);int[] location=new int[2];v.getLocationOnScreen(location);
+                return new int[]{location[0],location[1],v.getWidth(),v.getHeight()};
+            }
+            @Override public int edgeDirection(float rawX){
+                if(workspacePager==null)return 0;int[] location=new int[2];workspacePager.getLocationOnScreen(location);
+                int edge=dp(32);return rawX-location[0]<edge?-1:rawX-location[0]>workspacePager.getWidth()-edge?1:0;
+            }
+            @Override public void movePageForSwipe(int direction){
+                int count=Math.max(1,workspaceStrip==null?homePageCount():workspaceStrip.getChildCount());
+                int next=Math.max(0,Math.min(count-1,workspacePage+direction));
+                if(next!=workspacePage)settleWorkspace(next);
+            }
+            @Override public void movePageForDrag(int direction){
+                int next=Math.max(0,Math.min(pageCount()-1,workspacePage+direction));
+                if(next!=workspacePage)settleWorkspace(next);
+            }
+            @Override public String keyAt(int page,int cell){return workspaceModel==null?null:workspaceModel.at(page,cell);}
+            @Override public boolean isFolder(String key){return key!=null&&workspaceModel.isFolder(key);}
+            @Override public void preview(String key,View view,int page,int cell){
+                if(activeDragKey==null)homeDragOriginPage=workspacePage;
+                activeDragKey=key;activeDragView=view;
+                hoverPage=page;hoverCell=cell;previewReorder(page,cell);
+            }
+            @Override public void commit(String key,int page,int cell,String folderTarget){
+                if(folderTarget!=null&&workspaceModel.isFolder(folderTarget))workspaceModel.moveIntoFolder(key,folderTarget);
+                else if(folderTarget!=null&&!workspaceModel.isFolder(key))workspaceModel.createFolder(key,folderTarget);
+                else workspaceModel.reorder(key,page,cell);
+                clearDragPreview();finishWorkspaceDrag();refreshWorkspace();
+            }
+            @Override public void cancelPreview(String key,View view){clearDragPreview();finishWorkspaceDrag();}
+            @Override public void restoreOriginPage(){
+                if(workspacePager!=null)settleWorkspace(homeDragOriginPage);
+            }
+            @Override public void tapped(String key){MenuModel.Entry entry=homeEntry(key);if(entry!=null){if(workspaceModel.isFolder(key))openHomeFolder(key);else launch(entry);}}
+        },ViewConfiguration.get(this));
         workspacePager.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
             if(r-l!=or-ol||b-t!=ob-ot)workspacePager.post(this::rebuildWorkspace);
         });
         rebuildWorkspace();
+        workspacePager.post(this::rebuildWorkspace);
         View gap=new View(this);
         content.addView(gap,new LinearLayout.LayoutParams(-1,dp(18)));
         dock=new LinearLayout(this);dock.setGravity(Gravity.CENTER);
@@ -430,9 +526,25 @@ public final class LauncherActivity extends Activity {
                 cp.topMargin=(placement.cell/HomeWorkspaceModel.COLUMNS)*cellHeight;
                 surface.addView(cell,cp);
                 cell.setTag(entry.key);
-                cell.setOnClickListener(v->{if(workspaceModel.isFolder(entry.key))openHomeFolder(entry.key);else launch(entry);});
-                cell.setOnLongClickListener(v->{startAppDrag(v,entry.key);return true;});
-                cell.setOnDragListener((v,event)->{
+                if(exp2HomeEngineEnabled()){
+                    // The engine owns the complete pointer sequence. Mark the
+                    // container clickable so Android dispatches touch events to
+                    // this listener instead of treating the visual children as
+                    // the terminal target.
+                    cell.setClickable(true);cell.setLongClickable(true);
+                    View.OnTouchListener exp2Touch=(v,event)->exp2HomeDrag.onIconTouch(cell,entry.key,pageIndex,event);
+                    // The visual children receive the actual pointer. Keeping
+                    // the parent listener too would let the same DOWN bubble
+                    // into a second arbitration attempt on API 26.
+                    cell.setOnTouchListener(null);
+                    for(int child=0;child<cell.getChildCount();child++){
+                        View visual=cell.getChildAt(child);visual.setClickable(true);visual.setLongClickable(true);visual.setOnTouchListener(exp2Touch);
+                    }
+                }else{
+                    cell.setOnClickListener(v->{if(workspaceModel.isFolder(entry.key))openHomeFolder(entry.key);else launch(entry);});
+                    cell.setOnLongClickListener(v->{startAppDrag(v,entry.key);return true;});
+                }
+                if(!exp2HomeEngineEnabled())cell.setOnDragListener((v,event)->{
                     if(event.getAction()==DragEvent.ACTION_DRAG_STARTED)return event.getLocalState() instanceof String;
                     if(event.getAction()==DragEvent.ACTION_DRAG_LOCATION){trackWorkspaceDrag(v,event,pageIndex);return true;}
                 if(event.getAction()==DragEvent.ACTION_DRAG_ENDED){endWorkspaceDrag(event);return true;}
@@ -455,23 +567,89 @@ public final class LauncherActivity extends Activity {
         }
         workspacePager.scrollTo(workspacePage*width,0);
     }
+    private boolean exp2HomeEngineEnabled(){return exp2()&&exp2Prefs!=null&&exp2Prefs.getBoolean("home_engine_v2",true);}
     private final class WorkspacePager extends HorizontalScrollView{
-        private float downX;private boolean flung;
+        private float downX,downY;private boolean flung;private boolean pagerOwnsSequence;
         WorkspacePager(Context context){super(context);}
         @Override public boolean dispatchTouchEvent(MotionEvent event){
-            if(event.getAction()==MotionEvent.ACTION_DOWN){downX=event.getX();flung=false;}
+            if(event.getAction()==MotionEvent.ACTION_DOWN){
+                downX=event.getX();downY=event.getY();flung=false;pagerOwnsSequence=false;requestDisallowInterceptTouchEvent(true);
+                cancelHomeLongPress();
+            }
+            if(event.getAction()==MotionEvent.ACTION_MOVE){
+                float dx=event.getX()-downX,dy=event.getY()-downY;
+                if(Math.abs(dx)>touchSlop||Math.abs(dy)>touchSlop)cancelHomeLongPress();
+                if(Math.abs(dx)>touchSlop&&Math.abs(dx)>Math.abs(dy))requestDisallowInterceptTouchEvent(true);
+            }
             boolean handled=super.dispatchTouchEvent(event);
-            if(event.getAction()==MotionEvent.ACTION_UP&&!flung&&getWidth()>0){
+            if(event.getAction()==MotionEvent.ACTION_DOWN){
+                // The child icon listener claims its sequence during super.dispatchTouchEvent.
+                // Empty-surface gestures remain owned by this pager.
+                pagerOwnsSequence=exp2HomeDrag==null||!exp2HomeDrag.pointerSequenceActive();
+            }
+            if(event.getAction()==MotionEvent.ACTION_UP&&pagerOwnsSequence&&!flung&&getWidth()>0){
                 float dx=event.getX()-downX;
                 int next=Math.abs(dx)>getWidth()*0.18f?workspacePage+(dx<0?1:-1):Math.round((float)getScrollX()/getWidth());
                 settleWorkspace(next);
+                requestDisallowInterceptTouchEvent(false);
+            }
+            if(event.getAction()==MotionEvent.ACTION_UP||event.getAction()==MotionEvent.ACTION_CANCEL){
+                pagerOwnsSequence=false;requestDisallowInterceptTouchEvent(false);
             }
             return handled;
         }
+        // Empty-surface long press is owned by emptyHomeTouch(). Keeping the
+        // pager free of a second timer prevents one pointer sequence from
+        // scheduling both Edit Mode and the Nokia context-menu policy.
         @Override public void fling(int velocityX){flung=true;settleWorkspace(workspacePage+(velocityX>0?1:-1));}
     }
+    /** Widgets preserve vertical scrolling; horizontal gestures use Home's single settle owner. */
+    private final class WidgetScrollView extends ScrollView{
+        private float downX,downY;private boolean horizontalGesture,launcherGesture;
+        WidgetScrollView(Context context){super(context);}
+        @Override public boolean onInterceptTouchEvent(MotionEvent event){
+            int action=event.getActionMasked();
+            if(action==MotionEvent.ACTION_DOWN){downX=event.getX();downY=event.getY();horizontalGesture=false;launcherGesture=!touchOnVisibleWidget(event.getRawX(),event.getRawY());if(launcherGesture)return true;}
+            else if(action==MotionEvent.ACTION_MOVE&&!horizontalGesture){
+                float dx=event.getX()-downX,dy=event.getY()-downY;
+                if(Math.abs(dx)>touchSlop&&Math.abs(dx)>Math.abs(dy)){
+                    horizontalGesture=true;requestDisallowInterceptTouchEvent(true);return true;
+                }
+            }
+            if(launcherGesture&&(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL))launcherGesture=false;
+            return super.onInterceptTouchEvent(event);
+        }
+        @Override public boolean onTouchEvent(MotionEvent event){
+            if(launcherGesture){
+                boolean handled=emptyHomeTouch(this,event);
+                if(event.getActionMasked()==MotionEvent.ACTION_UP||event.getActionMasked()==MotionEvent.ACTION_CANCEL)launcherGesture=false;
+                return handled;
+            }
+            if(horizontalGesture){
+                int action=event.getActionMasked();
+                if(action==MotionEvent.ACTION_UP){
+                    float dx=event.getX()-downX;
+                    if(Math.abs(dx)>getWidth()*0.18f)settleWorkspace(workspacePage+(dx<0?1:-1));
+                    horizontalGesture=false;requestDisallowInterceptTouchEvent(false);return true;
+                }
+                if(action==MotionEvent.ACTION_CANCEL){horizontalGesture=false;requestDisallowInterceptTouchEvent(false);return true;}
+                return true;
+            }
+            if(!hasVisibleWidget())return emptyHomeTouch(this,event);
+            return super.onTouchEvent(event);
+        }
+        private boolean touchOnVisibleWidget(float rawX,float rawY){
+            if(widgetColumn==null)return false;
+            for(int i=0;i<widgetColumn.getChildCount();i++){
+                View child=widgetColumn.getChildAt(i);if(child.getVisibility()!=View.VISIBLE)continue;
+                int[] location=new int[2];child.getLocationOnScreen(location);
+                if(rawX>=location[0]&&rawX<location[0]+child.getWidth()&&rawY>=location[1]&&rawY<location[1]+child.getHeight())return true;
+            }
+            return false;
+        }
+    }
     private void settleWorkspace(int page){
-        int last=exp2()&&activeDragKey==null?homePageCount()-1:workspaceStrip.getChildCount()-1;
+        int last=exp2()?Math.max(0,workspaceStrip.getChildCount()-1):workspaceStrip.getChildCount()-1;
         workspacePage=Math.max(0,Math.min(page,Math.max(0,last)));
         workspacePager.smoothScrollTo(workspacePage*workspacePager.getWidth(),0);
         updateVisibleWidgets();
@@ -573,6 +751,12 @@ public final class LauncherActivity extends Activity {
         }
         return Math.max(1,count);
     }
+    private boolean hasVisibleWidget(){
+        if(widgetColumn==null)return false;
+        for(int i=0;i<widgetColumn.getChildCount();i++)
+            if(widgetColumn.getChildAt(i).getVisibility()==View.VISIBLE)return true;
+        return false;
+    }
     private void updateVisibleWidgets(){
         if(widgetColumn==null)return;
         boolean any=false;
@@ -584,7 +768,10 @@ public final class LauncherActivity extends Activity {
             }
         }
         // Keep the widget row in the weighted Home layout when empty so app cells do not shift.
-        if(widgetScroller!=null)widgetScroller.setVisibility(any?View.VISIBLE:View.INVISIBLE);
+        // Keep the gesture surface present even when the current page has no widget.
+        // INVISIBLE would leave this whole upper Home area outside both the pager
+        // and WidgetScrollView's horizontal arbitration after a restart.
+        if(widgetScroller!=null)widgetScroller.setVisibility(View.VISIBLE);
     }
     private void openHomeFolder(String id){
         List<String> keys=workspaceModel.folderItems(id);ArrayList<MenuModel.Entry> entries=new ArrayList<>();
@@ -643,7 +830,7 @@ public final class LauncherActivity extends Activity {
         View dim=new View(this);dim.setTag("dim");
         drawer.addView(dim,new FrameLayout.LayoutParams(-1,-1));
         drawerShell=new LinearLayout(this);drawerShell.setOrientation(LinearLayout.VERTICAL);
-        drawerShell.setPadding(dp(10),dp(4),dp(10),dp(6));
+        drawerShell.setPadding(dp(10),dp(58)+dp(4),dp(10),dp(6));
         drawer.addView(drawerShell,new FrameLayout.LayoutParams(-1,-1));
         LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setTag("drawerHeader");
         header.setBackgroundColor(Color.TRANSPARENT);
@@ -974,6 +1161,7 @@ public final class LauncherActivity extends Activity {
     @Override public boolean dispatchTouchEvent(MotionEvent event){
         if(event.getAction()==MotionEvent.ACTION_DOWN){
             swipeX=event.getX();swipeY=event.getY();swipeConsumed=false;
+            upperSwipeCandidate=!exp2EditMode&&isInWidgetScrollArea(event.getRawX(),event.getRawY());upperSwipeConsumed=false;
             if(editingWidget!=null){
                 int[] position=new int[2];editingWidget.getLocationOnScreen(position);
                 if(event.getRawX()<position[0]||event.getRawX()>position[0]+editingWidget.getWidth()||
@@ -984,23 +1172,41 @@ public final class LauncherActivity extends Activity {
         if(event.getAction()==MotionEvent.ACTION_MOVE){
             float dx=event.getX()-swipeX,dy=event.getY()-swipeY;
             if(Math.abs(dx)>touchSlop||Math.abs(dy)>touchSlop)cancelHomeLongPress();
-            if(!drawerOpen&&dy<-dp(65)&&Math.abs(dy)>Math.abs(dx)*1.3f&&swipeY>root.getHeight()*0.30f){
+            if(upperSwipeCandidate&&!upperSwipeConsumed&&Math.abs(dx)>touchSlop&&Math.abs(dx)>Math.abs(dy)){
+                MotionEvent cancel=MotionEvent.obtain(event);cancel.setAction(MotionEvent.ACTION_CANCEL);
+                super.dispatchTouchEvent(cancel);cancel.recycle();upperSwipeConsumed=true;return true;
+            }
+            if(upperSwipeConsumed)return true;
+            if(!drawerOpen&&(exp2HomeDrag==null||!exp2HomeDrag.pointerSequenceActive())&&
+                dy<-dp(65)&&Math.abs(dy)>Math.abs(dx)*1.3f&&swipeY>root.getHeight()*0.30f){
                 MotionEvent cancel=MotionEvent.obtain(event);cancel.setAction(MotionEvent.ACTION_CANCEL);
                 super.dispatchTouchEvent(cancel);cancel.recycle();openDrawer();swipeConsumed=true;return true;
             }
         }
         if(event.getAction()==MotionEvent.ACTION_UP){
             float dy=event.getY()-swipeY,dx=event.getX()-swipeX;
+            if(upperSwipeConsumed){
+                settleWorkspace(workspacePage+(dx<0?1:-1));upperSwipeConsumed=false;upperSwipeCandidate=false;return true;
+            }
             if(Math.abs(dy)>dp(90)&&Math.abs(dy)>Math.abs(dx)*1.3f){
                 if(drawerOpen&&dy>0){closeDrawer();return true;}
             }
+            upperSwipeCandidate=false;
         }
+        if(event.getAction()==MotionEvent.ACTION_CANCEL){upperSwipeConsumed=false;upperSwipeCandidate=false;}
         return super.dispatchTouchEvent(event);
+    }
+    private boolean isInWidgetScrollArea(float rawX,float rawY){
+        if(widgetScroller==null||widgetScroller.getVisibility()!=View.VISIBLE)return false;
+        int[] location=new int[2];widgetScroller.getLocationOnScreen(location);
+        return rawX>=location[0]&&rawX<location[0]+widgetScroller.getWidth()&&
+            rawY>=location[1]&&rawY<location[1]+widgetScroller.getHeight();
     }
     private void cancelHomeLongPress(){if(pendingHomeLongPress!=null){handler.removeCallbacks(pendingHomeLongPress);pendingHomeLongPress=null;}}
     private boolean emptyHomeTouch(View view,MotionEvent event){
         if(event.getAction()==MotionEvent.ACTION_DOWN){
-            cancelHomeLongPress();pendingHomeLongPress=()->{pendingHomeLongPress=null;showHomeOptions();};
+            cancelHomeLongPress();pendingHomeLongPress=()->{pendingHomeLongPress=null;
+                if(exp2HomeEngineEnabled())enterExp2EditMode();else showHomeOptions();};
             handler.postDelayed(pendingHomeLongPress,ViewConfiguration.getLongPressTimeout());return true;
         }
         if(event.getAction()==MotionEvent.ACTION_MOVE){
@@ -1010,7 +1216,10 @@ public final class LauncherActivity extends Activity {
         if(event.getAction()==MotionEvent.ACTION_UP||event.getAction()==MotionEvent.ACTION_CANCEL){cancelHomeLongPress();return true;}
         return true;
     }
-    @Override public void onBackPressed(){if(drawerOpen)closeDrawer();/* Home remains the root destination. */}
+    @Override public void onBackPressed(){
+        if(exp2EditMode){exitExp2EditMode();return;}
+        if(drawerOpen)closeDrawer();/* Home remains the root destination. */
+    }
     @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);if(drawerOpen){folderId=null;drawerOpen=false;drawer.setVisibility(View.GONE);}updateSystemStatusBar();refresh();}
     @Override protected void onResume(){
         super.onResume();
@@ -1027,6 +1236,11 @@ public final class LauncherActivity extends Activity {
             filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
             filter.addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED);
             filter.addAction(Intent.ACTION_HEADSET_PLUG);
+            filter.addAction(Intent.ACTION_AIRPLANE_MODE_CHANGED);
+            filter.addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
+            filter.addAction(NfcAdapter.ACTION_ADAPTER_STATE_CHANGED);
+            filter.addAction("android.app.action.NEXT_ALARM_CLOCK_CHANGED");
+            filter.addAction(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED);
             filter.addAction("com.nokiaexperience.launcher.NOTIFICATIONS_CHANGED");
             registerReceiver(changes,filter);
             IntentFilter packages=new IntentFilter();
@@ -1043,6 +1257,7 @@ public final class LauncherActivity extends Activity {
     }
     @Override protected void onPause(){
         cancelHomeLongPress();
+        if(exp2HomeDrag!=null&&exp2HomeDrag.active())exp2HomeDrag.cancel();
         handler.removeCallbacks(tick);stopStartupSound();
         if(startup!=null){startup.release();root.removeView(startup);startup=null;startupPending=true;}
         try{widgetHost.stopListening();}catch(Exception ignored){}
@@ -1050,32 +1265,45 @@ public final class LauncherActivity extends Activity {
         if(receiverRegistered){unregisterReceiver(changes);receiverRegistered=false;}
         sounds.release();super.onPause();
     }
-    @Override public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);if(focus){updateSystemStatusBar();maybeStartup();}}
+    @Override public void onWindowFocusChanged(boolean focus){
+        super.onWindowFocusChanged(focus);
+        if(focus){updateSystemStatusBar();maybeStartup();}
+        else cancelHomeLongPress();
+    }
     private void maybeStartup(){
         if(!startupPending||startup!=null)return;
         KeyguardManager keyguard=(KeyguardManager)getSystemService(KEYGUARD_SERVICE);
         if(keyguard!=null&&keyguard.isKeyguardLocked())return;
         startupPending=false;
-        startup=new StartupView(this,startStartupSound(),this::stopStartupSound,()->{
+        startupAudioFinished=false;
+        int startupFrameMs=startStartupSound();
+        startup=new StartupView(this,startupFrameMs,this::stopStartupSound,()->{
             if(startup!=null){root.removeView(startup);startup=null;}
             maybeRequestWallpaperPermission();
         });
+        startup.setHoldLastFrame(startupPlayer!=null);
+        if(startupAudioFinished)startup.audioFinished();
         root.addView(startup,new FrameLayout.LayoutParams(-1,-1));
     }
     private int startStartupSound(){
-        if(!prefs.getBoolean("startup_sound",true))return 85;
+        startupAudioFinished=!prefs.getBoolean("startup_sound",true);
+        if(startupAudioFinished)return 65;
         try{
             AudioManager a=(AudioManager)getSystemService(AUDIO_SERVICE);
-            if(a!=null&&a.getRingerMode()!=AudioManager.RINGER_MODE_NORMAL)return 85;
+            if(a!=null&&a.getRingerMode()!=AudioManager.RINGER_MODE_NORMAL){startupAudioFinished=true;return 65;}
             startupPlayer=new MediaPlayer();
             startupPlayer.setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build());
             try(AssetFileDescriptor file=getAssets().openFd("n95/startup_sound_user.mp3")){
                 startupPlayer.setDataSource(file.getFileDescriptor(),file.getStartOffset(),file.getLength());
             }
+            startupPlayer.setOnCompletionListener(p->{startupAudioFinished=true;if(startup!=null)startup.audioFinished();});
             startupPlayer.setOnErrorListener((p,w,e)->{Log.e("NokiaStartup","MediaPlayer error "+w+"/"+e);stopStartupSound();return true;});
             startupPlayer.prepare();int duration=startupPlayer.getDuration();startupPlayer.start();
-            return Math.max(65,Math.min(220,duration>0?duration/20:85));
-        }catch(Exception e){Log.e("NokiaStartup","sound unavailable",e);stopStartupSound();return 85;}
+            // Twenty frames are kept; only the pacing is shortened so the
+            // Connecting people sequence remains recognizable without
+            // delaying Home for the old 1.3-4.4 second frame range.
+            return Math.max(35,Math.min(100,duration>0?duration/20:65));
+        }catch(Exception e){Log.e("NokiaStartup","sound unavailable",e);startupAudioFinished=true;stopStartupSound();return 65;}
     }
     private void stopStartupSound(){
         MediaPlayer p=startupPlayer;startupPlayer=null;
@@ -1117,19 +1345,80 @@ public final class LauncherActivity extends Activity {
             headsetConnected=audio!=null&&(audio.isWiredHeadsetOn()||audio.isBluetoothA2dpOn()||audio.isBluetoothScoOn());
             bluetoothConnected=bluetoothEnabled&&audio!=null&&(audio.isBluetoothA2dpOn()||audio.isBluetoothScoOn());
         }catch(Exception ignored){}
+        alarmSet=false;
+        try{alarmSet=!TextUtils.isEmpty(Settings.System.getString(getContentResolver(),Settings.System.NEXT_ALARM_FORMATTED));}catch(Exception ignored){}
+        try{
+            NfcAdapter nfc=NfcAdapter.getDefaultAdapter(this);
+            nfcEnabled=nfc!=null&&nfc.isEnabled();
+        }catch(Exception ignored){nfcEnabled=false;}
+        try{airplaneMode=Settings.Global.getInt(getContentResolver(),Settings.Global.AIRPLANE_MODE_ON,0)!=0;}catch(Exception ignored){airplaneMode=false;}
+        try{
+            PowerManager power=(PowerManager)getSystemService(POWER_SERVICE);
+            powerSaveMode=power!=null&&power.isPowerSaveMode();
+        }catch(Exception ignored){powerSaveMode=false;}
+        doNotDisturb=false;
+        try{
+            NotificationManager notifications=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
+            doNotDisturb=notifications!=null&&notifications.getCurrentInterruptionFilter()!=NotificationManager.INTERRUPTION_FILTER_ALL;
+        }catch(Exception ignored){
+            try{doNotDisturb=Settings.Global.getInt(getContentResolver(),"zen_mode",0)!=0;}catch(Exception ignoredAgain){doNotDisturb=false;}
+        }
         notificationIndicators=NokiaNotificationListener.statusIndicators(this);
         if(statusGlyph!=null)statusGlyph.invalidate();
+    }
+    /** Returns the default-data SIM slot when Android exposes it; slot zero is the safe fallback. */
+    private int activeSimSlot(){
+        if(Build.VERSION.SDK_INT>=22){
+            try{
+                SubscriptionManager subscriptions=SubscriptionManager.from(this);
+                int id=SubscriptionManager.getDefaultDataSubscriptionId();
+                if(id!=SubscriptionManager.INVALID_SUBSCRIPTION_ID){
+                    SubscriptionInfo info=subscriptions.getActiveSubscriptionInfo(id);
+                    if(info!=null)return info.getSimSlotIndex()==1?1:0;
+                }
+            }catch(SecurityException ignored){}
+            catch(Exception ignored){}
+            try{
+                // Android 8 exposes the selected data slot through the
+                // readable global setting even when runtime phone-state
+                // permission has not been granted to the launcher.
+                int dataSlot=Settings.Global.getInt(getContentResolver(),"multi_sim_data_call",-1);
+                if(dataSlot==1)return 1;
+                if(dataSlot==0)return 0;
+            }catch(Exception ignored){}
+        }
+        return 0;
     }
     private final class StatusGlyph extends View{
         private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
         private final Paint notificationPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Bitmap signalSegment,batterySegment,signalMark,batteryMark;
+        private final Drawable signalSegment,batterySegment,signalMark,signalMarkSim2,batteryMark;
+        private final Drawable smsIcon,missedCallIcon,bluetoothIcon;
+        private final Drawable[] frameworkWifiIcons=new Drawable[5];
+        private final Drawable frameworkAlarm,frameworkNfc,frameworkAirplane,frameworkPowerSave;
+        private final Drawable dndIcon;
         private final Path messageGlyph=new Path(),missedGlyph=new Path(),bluetoothGlyph=new Path(),headsetGlyph=new Path();
+        private final Path nfcFallbackGlyph=new Path(),airplaneFallbackGlyph=new Path(),powerSaveFallbackGlyph=new Path();
         private final RectF[] notificationBounds={new RectF(),new RectF(),new RectF(),new RectF()};
         StatusGlyph(Context c){
             super(c);setContentDescription("Nokia: время, дата, сеть, Wi-Fi и батарея");
-            signalSegment=sprite("signal_segment");batterySegment=sprite("battery_segment");
-            signalMark=sprite("signal_mark");batteryMark=sprite("battery_mark");
+            signalSegment=exp2()?icon(R.drawable.p2_5_network_indicator):legacyIcon("signal_segment");
+            batterySegment=exp2()?icon(R.drawable.p2_5_battery_indicator):legacyIcon("battery_segment");
+            signalMark=exp2()?icon(R.drawable.p2_5_network_mark):legacyIcon("signal_mark");
+            signalMarkSim2=exp2()?icon(R.drawable.p2_5_network_mark_sim2):signalMark;
+            batteryMark=exp2()?icon(R.drawable.p2_5_battery_mark):legacyIcon("battery_mark");
+            smsIcon=exp2()?icon(R.drawable.p2_5_sms):null;
+            missedCallIcon=exp2()?icon(R.drawable.p2_5_missed_call):null;
+            bluetoothIcon=exp2()?icon(R.drawable.p2_5_bluetooth):null;
+            dndIcon=exp2()?icon(R.drawable.p2_5_dnd):null;
+            for(int i=0;i<frameworkWifiIcons.length;i++){
+                frameworkWifiIcons[i]=systemUiIcon("stat_sys_wifi_signal_"+i);
+                if(frameworkWifiIcons[i]==null)frameworkWifiIcons[i]=frameworkIcon("stat_sys_wifi_signal_"+i);
+            }
+            frameworkAlarm=systemOrFrameworkIcon("stat_sys_alarm");
+            frameworkNfc=systemOrFrameworkIcon("stat_sys_nfc");
+            frameworkAirplane=systemOrFrameworkIcon("stat_sys_airplane_mode");
+            frameworkPowerSave=systemOrFrameworkIcon("stat_sys_battery_saver");
             // Clean, size-matched traces of the supplied S60 status screenshots.
             // The tiny screenshot crops remain in assets as references, not firmware-original vectors.
             messageGlyph.moveTo(1.5f,3.5f);messageGlyph.lineTo(14.5f,3.5f);
@@ -1148,6 +1437,13 @@ public final class LauncherActivity extends Activity {
             headsetGlyph.moveTo(2.5f,9.5f);headsetGlyph.lineTo(2.5f,7.5f);
             headsetGlyph.cubicTo(2.5f,0.5f,13.5f,0.5f,13.5f,7.5f);
             headsetGlyph.lineTo(13.5f,9.5f);
+            nfcFallbackGlyph.moveTo(3f,3f);nfcFallbackGlyph.lineTo(13f,3f);nfcFallbackGlyph.lineTo(13f,13f);nfcFallbackGlyph.lineTo(3f,13f);nfcFallbackGlyph.close();
+            nfcFallbackGlyph.moveTo(5f,6f);nfcFallbackGlyph.cubicTo(7f,4f,9f,4f,11f,6f);
+            nfcFallbackGlyph.moveTo(5f,10f);nfcFallbackGlyph.cubicTo(7f,8f,9f,8f,11f,10f);
+            airplaneFallbackGlyph.moveTo(2f,8f);airplaneFallbackGlyph.lineTo(14f,8f);
+            airplaneFallbackGlyph.moveTo(7f,8f);airplaneFallbackGlyph.lineTo(5f,3f);airplaneFallbackGlyph.lineTo(7f,3f);airplaneFallbackGlyph.lineTo(9f,8f);
+            airplaneFallbackGlyph.moveTo(7f,8f);airplaneFallbackGlyph.lineTo(5f,13f);airplaneFallbackGlyph.lineTo(7f,13f);airplaneFallbackGlyph.lineTo(9f,8f);
+            powerSaveFallbackGlyph.moveTo(9f,1.5f);powerSaveFallbackGlyph.lineTo(4f,8f);powerSaveFallbackGlyph.lineTo(7f,8f);powerSaveFallbackGlyph.lineTo(5.5f,14.5f);powerSaveFallbackGlyph.lineTo(12f,6.5f);powerSaveFallbackGlyph.lineTo(9f,6.5f);powerSaveFallbackGlyph.close();
             messageGlyph.computeBounds(notificationBounds[0],true);
             missedGlyph.computeBounds(notificationBounds[1],true);
             bluetoothGlyph.computeBounds(notificationBounds[2],true);
@@ -1157,20 +1453,54 @@ public final class LauncherActivity extends Activity {
             notificationPaint.setStrokeCap(Paint.Cap.ROUND);
             notificationPaint.setStrokeJoin(Paint.Join.ROUND);
         }
-        private Bitmap sprite(String name){
-            try(InputStream stream=getAssets().open("reference/"+name+".png")){return BitmapFactory.decodeStream(stream);}
-            catch(Exception ignored){return null;}
+        private Drawable icon(int id){
+            try{return getResources().getDrawable(id,null);}catch(Exception ignored){return null;}
         }
-        private void stamp(Canvas canvas,Bitmap image,float left,float top,float width,float height){
-            if(image!=null)canvas.drawBitmap(image,null,new RectF(left,top,left+width,top+height),p);
+        private Drawable legacyIcon(String name){
+            try(InputStream stream=getAssets().open("reference/"+name+".png")){
+                Bitmap bitmap=BitmapFactory.decodeStream(stream);
+                return bitmap==null?null:new android.graphics.drawable.BitmapDrawable(getResources(),bitmap);
+            }catch(Exception ignored){return null;}
+        }
+        private Drawable frameworkIcon(String name){
+            try{
+                int id=getResources().getIdentifier(name,"drawable","android");
+                if(id==0)return null;
+                return getResources().getDrawable(id,null);
+            }catch(Exception ignored){return null;}
+        }
+        private Drawable systemUiIcon(String name){
+            try{
+                Context systemUi=createPackageContext("com.android.systemui",Context.CONTEXT_IGNORE_SECURITY);
+                int id=systemUi.getResources().getIdentifier(name,"drawable","com.android.systemui");
+                return id==0?null:systemUi.getResources().getDrawable(id,null);
+            }catch(Exception ignored){return null;}
+        }
+        private Drawable systemOrFrameworkIcon(String name){
+            Drawable drawable=systemUiIcon(name);
+            return drawable==null?frameworkIcon(name):drawable;
+        }
+        private void stamp(Canvas canvas,Drawable image,float left,float top,float width,float height){
+            if(image==null)return;image.setTint(statusIconColor());image.setBounds(Math.round(left),Math.round(top),Math.round(left+width),Math.round(top+height));image.draw(canvas);
+        }
+        private void indicator(Canvas canvas,Drawable image,float left,float top,float width,float height,int level){
+            if(image==null)return;image.setTint(statusIconColor());canvas.save();
+            // The supplied artwork is composed from the bottom segment up.
+            // Clip from the bottom so a near-full charging level animates the
+            // top segment instead of making the lowest segment blink.
+            float fraction=Math.max(0,Math.min(7,level))/7f;
+            canvas.clipRect(left,top+height*(1f-fraction),left+width,top+height);
+            image.setBounds(Math.round(left),Math.round(top),Math.round(left+width),Math.round(top+height));image.draw(canvas);canvas.restore();
         }
         private void drawNotification(Canvas canvas,Path glyph,int kind,float left){
             canvas.save();
             if(exp2()){
                 RectF bounds=notificationBounds[kind];
-                float scale=Math.min(dp(15)/Math.max(1f,bounds.width()),dp(12)/Math.max(1f,bounds.height()));
-                canvas.translate(left+(dp(15)-bounds.width()*scale)/2f-bounds.left*scale,
-                    dp(17)-bounds.bottom*scale);
+                float slot=dp(18);
+                float scale=Math.min(slot/Math.max(1f,bounds.width()),slot/Math.max(1f,bounds.height()));
+                float centerY=dp(12);
+                canvas.translate(left+(slot-bounds.width()*scale)/2f-bounds.left*scale,
+                    centerY-(bounds.top+bounds.height()/2f)*scale);
                 canvas.scale(scale,scale);
             }else{
                 canvas.translate(left,dp(3));
@@ -1187,21 +1517,85 @@ public final class LauncherActivity extends Activity {
             canvas.restore();
         }
         private int drawNotifications(Canvas c){
-            int count=0;float x=getWidth()-dp(35);
-            if((notificationIndicators&1)!=0){drawNotification(c,messageGlyph,0,x);x-=dp(17);count++;}
-            if((notificationIndicators&2)!=0){drawNotification(c,missedGlyph,1,x);x-=dp(17);count++;}
-            if(bluetoothEnabled){drawNotification(c,bluetoothGlyph,2,x);x-=dp(17);count++;}
-            if(headsetConnected){drawNotification(c,headsetGlyph,3,x);count++;}
+            int count=0;float x=getWidth()-dp(62);
+            if((notificationIndicators&1)!=0){
+                if(smsIcon!=null)drawNotificationDrawable(c,smsIcon,x);else drawNotification(c,messageGlyph,0,x);
+                x-=dp(20);count++;
+            }
+            if((notificationIndicators&2)!=0){
+                if(missedCallIcon!=null)drawNotificationDrawable(c,missedCallIcon,x);else drawNotification(c,missedGlyph,1,x);
+                x-=dp(20);count++;
+            }
+            if(bluetoothEnabled){
+                if(bluetoothIcon!=null)drawNotificationDrawable(c,bluetoothIcon,x);else drawNotification(c,bluetoothGlyph,2,x);
+                x-=dp(20);count++;
+            }
+            if(headsetConnected){drawNotification(c,headsetGlyph,3,x);x-=dp(20);count++;}
+            if(alarmSet){drawFrameworkStatusIcon(c,frameworkAlarm,x);x-=dp(20);count++;}
+            if(nfcEnabled){drawFrameworkStatusIcon(c,frameworkNfc,x,nfcFallbackGlyph);x-=dp(20);count++;}
+            if(airplaneMode){drawFrameworkStatusIcon(c,frameworkAirplane,x,airplaneFallbackGlyph);x-=dp(20);count++;}
+            if(powerSaveMode){drawFrameworkStatusIcon(c,frameworkPowerSave,x,powerSaveFallbackGlyph);count++;}
+            if(doNotDisturb&&dndIcon!=null){x-=dp(20);drawNotificationDrawable(c,dndIcon,x);count++;}
             return count;
+        }
+        private void drawNotificationDrawable(Canvas c,Drawable icon,float centerX){
+            int size=Math.round(dp(18));
+            icon.setTint(statusIconColor());
+            // All status glyphs share the same optical center. The previous
+            // top=9dp slot put SVG notifications lower than SystemUI glyphs
+            // that are centered at 12dp.
+            float centerY=dp(12);
+            icon.setBounds(Math.round(centerX-size/2f),Math.round(centerY-size/2f),
+                Math.round(centerX+size/2f),Math.round(centerY+size/2f));
+            icon.draw(c);
+        }
+        private void drawFrameworkStatusIcon(Canvas c,Drawable icon,float centerX){
+            drawFrameworkStatusIcon(c,icon,centerX,null,0);
+        }
+        private void drawFrameworkStatusIcon(Canvas c,Drawable icon,float centerX,Path fallback){
+            drawFrameworkStatusIcon(c,icon,centerX,fallback,0);
+        }
+        private void drawFrameworkStatusIcon(Canvas c,Drawable icon,float centerX,float opticalYOffset){
+            drawFrameworkStatusIcon(c,icon,centerX,null,opticalYOffset);
+        }
+        private void drawFrameworkStatusIcon(Canvas c,Drawable icon,float centerX,Path fallback,float opticalYOffset){
+            if(icon==null&&fallback==null)return;
+            int size=Math.round(dp(18));
+            if(icon!=null){
+                icon.setTint(statusIconColor());
+                // Keep native status glyphs on the same optical center line as
+                // the Wi-Fi glyph (center Y = 12dp). The old fixed top=9dp
+                // placed alarm/power-save lower than Wi-Fi.
+                float centerY=dp(12)+opticalYOffset;
+                icon.setBounds(Math.round(centerX-size/2f),Math.round(centerY-size/2f),
+                    Math.round(centerX+size/2f),Math.round(centerY+size/2f));
+                icon.draw(c);
+            }else{
+                c.save();
+                c.translate(centerX-dp(9),dp(12)-dp(9));c.scale(dp(18)/15f,dp(18)/15f);
+                notificationPaint.setColor(statusIconColor());notificationPaint.setStyle(Paint.Style.STROKE);notificationPaint.setStrokeWidth(1.7f);
+                notificationPaint.setStrokeCap(Paint.Cap.ROUND);notificationPaint.setStrokeJoin(Paint.Join.ROUND);
+                c.drawPath(fallback,notificationPaint);c.restore();
+            }
         }
         @Override protected void onDraw(Canvas c){
             super.onDraw(c);
             p.setColor(Color.WHITE);p.setAlpha(255);
             int rightIcons=drawNotifications(c);
-            float signalX=dp(2);
-            float batteryX=getWidth()-dp(15);
-            stamp(c,signalMark,signalX,dp(25),dp(12),dp(10));
-            stamp(c,batteryMark,batteryX,dp(23),dp(13),dp(14));
+            float pixelsPerDp=getResources().getDisplayMetrics().density;
+            // Match FRAME Экран in physical pixels: the supplied reference
+            // uses tall 100px indicators and marks at the lower outer edges.
+            float signalIndicatorLeft=dp(3f/pixelsPerDp);
+            float signalIndicatorWidth=dp(42f/pixelsPerDp);
+            float batteryIndicatorLeft=getWidth()-dp(46f/pixelsPerDp);
+            float batteryIndicatorWidth=dp(43f/pixelsPerDp);
+            float signalMarkWidth=dp(35f/pixelsPerDp);
+            float signalMarkHeight=dp(38f/pixelsPerDp);
+            float batteryMarkWidth=dp(40f/pixelsPerDp);
+            float batteryMarkHeight=dp(46f/pixelsPerDp);
+            // Optical centering correction for the transparent SVG margins.
+            stamp(c,activeSimSlot()==1?signalMarkSim2:signalMark,dp(-2f/pixelsPerDp),dp(103f/pixelsPerDp),signalMarkWidth,signalMarkHeight);
+            stamp(c,batteryMark,getWidth()-dp(36f/pixelsPerDp),dp(101f/pixelsPerDp),batteryMarkWidth,batteryMarkHeight);
             int signalBars=device.signalLevel<0?0:Math.min(7,Math.round(device.signalLevel*7f/4f));
             int batteryBars=device.batteryPercent<0?0:device.batteryPercent>=100?7:Math.max(1,(device.batteryPercent*7)/100);
             if(device.batteryPercent>=0&&device.batteryPercent<=15&&!device.charging){
@@ -1211,15 +1605,23 @@ public final class LauncherActivity extends Activity {
                 batteryBars=Math.min(7,batteryBars+(int)((SystemClock.uptimeMillis()/340)%(8-batteryBars)));
                 postInvalidateDelayed(340);
             }
-            for(int i=0;i<signalBars;i++)stamp(c,signalSegment,signalX+dp(1),dp(21-i*3),dp(10),dp(2.5f));
-            for(int i=0;i<batteryBars;i++)stamp(c,batterySegment,batteryX+dp(1),dp(21-i*3),dp(11),dp(2.5f));
+            // Left and right groups use one X-zone each. The mark occupies a
+            // separate lower slot; the right group is kept outside notifications.
+            indicator(c,signalSegment,signalIndicatorLeft,dp(3f/pixelsPerDp),signalIndicatorWidth,dp(100f/pixelsPerDp),signalBars);
+            indicator(c,batterySegment,batteryIndicatorLeft,0, batteryIndicatorWidth,dp(101f/pixelsPerDp),batteryBars);
+            if(device.batteryPercent>=0){
+                p.setTextAlign(Paint.Align.RIGHT);
+                p.setTextSize(getResources().getDisplayMetrics().scaledDensity*8);
+                c.drawText(device.batteryPercent+"%",getWidth()-dp(36f/pixelsPerDp),dp(135f/pixelsPerDp),p);
+                p.setTextAlign(Paint.Align.LEFT);
+            }
             p.setColor(Color.WHITE);p.setTypeface(android.graphics.Typeface.create("sans-serif-condensed",android.graphics.Typeface.BOLD));
             p.setShadowLayer(dp(2),0,dp(1),Color.BLACK);
-            float textX=signalX+dp(19);
+            float textX=dp(19);
             p.setTextSize(getResources().getDisplayMetrics().scaledDensity*17);
             c.drawText(statusTime,textX,dp(19),p);
             float operatorX=textX+p.measureText(statusTime)+dp(7);
-            float wifiX=batteryX-dp(21+rightIcons*17);
+            float wifiX=getWidth()-dp(62+rightIcons*20);
             p.setTextSize(getResources().getDisplayMetrics().scaledDensity*11);
             if(!statusOperator.isEmpty()&&operatorX<wifiX-dp(8)){
                 String operator=statusOperator;
@@ -1233,15 +1635,32 @@ public final class LauncherActivity extends Activity {
             c.drawText(statusDate,textX,dp(37),p);
             p.clearShadowLayer();
             if(wifiEnabled){
-                p.setColor(wifiConnected?Color.WHITE:0x99FFFFFF);
-                p.setTextSize(getResources().getDisplayMetrics().scaledDensity*9);
-                c.drawText("W",wifiX-dp(8),dp(17),p);
-                for(int i=0;i<4;i++){
-                    p.setColor(wifiConnected&&wifiLevel>=i?Color.WHITE:0x66FFFFFF);
-                    float h=dp(3+i*2);
-                    c.drawRect(wifiX+dp(i*3),dp(19)-h,wifiX+dp(i*3+2),dp(19),p);
-                }
+                drawFrameworkWifi(c,wifiX-dp(2),dp(12),wifiConnected,wifiLevel);
             }
+        }
+        private void drawFrameworkWifi(Canvas c,float centerX,float centerY,boolean connected,int level){
+            Drawable wifi=null;
+            if(connected&&level>=0&&level<frameworkWifiIcons.length)wifi=frameworkWifiIcons[level];
+            if(wifi==null&&connected)wifi=frameworkWifiIcons[0];
+            if(wifi==null){drawWifiGlyph(c,centerX,centerY,connected,level);return;}
+            int size=Math.round(dp(18));
+            wifi.setTint(connected?statusIconColor():0x99FFFFFF);
+            wifi.setBounds(Math.round(centerX-size/2f),Math.round(centerY-size/2f),
+                Math.round(centerX+size/2f),Math.round(centerY+size/2f));
+            wifi.draw(c);
+        }
+        private void drawWifiGlyph(Canvas c,float centerX,float centerY,boolean connected,int level){
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeCap(Paint.Cap.ROUND);
+            p.setStrokeWidth(dp(1.4f));
+            p.setColor(connected?Color.WHITE:0x99FFFFFF);
+            float r=dp(8);
+            c.drawArc(new RectF(centerX-r,centerY-r,centerX+r,centerY+r),225,90,false,p);
+            r=dp(5.2f);
+            c.drawArc(new RectF(centerX-r,centerY-r,centerX+r,centerY+r),225,90,false,p);
+            p.setStyle(Paint.Style.FILL);
+            c.drawCircle(centerX,centerY+dp(4.3f),dp(1.5f),p);
+            p.setStrokeCap(Paint.Cap.BUTT);
         }
     }
     private void showStatusActions(){
@@ -1345,6 +1764,211 @@ public final class LauncherActivity extends Activity {
             if(n==0)addWidget();else if(n==1)showSettings();else chooseWallpaper();
         }));
     }
+
+    /** Exp2-only edit mode. It is a presentation/controller layer over the existing Home model. */
+    private void enterExp2EditMode(){
+        if(!exp2()||exp2EditMode||root==null)return;
+        cancelHomeLongPress();
+        exp2EditMode=true;
+        exp2EditOverlay=new FrameLayout(this);
+        exp2EditOverlay.setBackgroundColor(Color.TRANSPARENT);
+        exp2EditOverlay.setClickable(true);
+        ImageView backdrop=new ImageView(this);backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        Bitmap backdropBitmap=exp2EditBackdrop();if(backdropBitmap!=null)backdrop.setImageBitmap(backdropBitmap);
+        exp2EditOverlay.addView(backdrop,new FrameLayout.LayoutParams(-1,-1));
+        View veil=new View(this);veil.setBackgroundColor(0x551A3045);exp2EditOverlay.addView(veil,new FrameLayout.LayoutParams(-1,-1));
+        int screenHeight=getResources().getDisplayMetrics().heightPixels;
+        int bottomReserve=Math.round(screenHeight*99f/1920f);
+        LinearLayout panel=new LinearLayout(this);panel.setOrientation(LinearLayout.VERTICAL);panel.setPadding(0,dp(8),0,bottomReserve);
+        LinearLayout heading=new LinearLayout(this);heading.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title=label("Рабочие столы",17,Color.WHITE);heading.addView(title,new LinearLayout.LayoutParams(-1,dp(34)));
+        title.setShadowLayer(dp(2),0,dp(1),0xCC102131);
+        heading.setPadding(dp(38),0,dp(38),0);panel.addView(heading,new LinearLayout.LayoutParams(-1,dp(36)));
+        exp2EditPreviewRow=new LinearLayout(this);exp2EditPreviewRow.setGravity(Gravity.CENTER_VERTICAL);
+        EditPreviewScrollView previewsScroll=new EditPreviewScrollView(this);previewsScroll.setHorizontalScrollBarEnabled(false);previewsScroll.setFillViewport(false);
+        previewsScroll.setTranslationY(-dp(8));
+        previewsScroll.addView(exp2EditPreviewRow,new HorizontalScrollView.LayoutParams(-2,-1));
+        panel.addView(previewsScroll,new LinearLayout.LayoutParams(-1,0,1));
+        exp2EditIndicator=label("",13,Color.WHITE);exp2EditIndicator.setShadowLayer(dp(2),0,dp(1),0xCC102131);exp2EditIndicator.setTranslationY(-dp(20));panel.addView(exp2EditIndicator,new LinearLayout.LayoutParams(-1,dp(38)));
+        LinearLayout actions=new LinearLayout(this);actions.setGravity(Gravity.CENTER);actions.setPadding(dp(42),dp(8),dp(42),dp(6));
+        actions.setBackgroundColor(Color.TRANSPARENT);
+        addExp2Action(actions,"Обои",this::chooseWallpaper);
+        addExp2Action(actions,"Темы",this::showAppearanceSettings);
+        addExp2Action(actions,"Виджеты",this::addWidget);
+        addExp2Action(actions,"Настройки экрана",this::showSettings);
+        int actionHeight=Math.round(screenHeight*207f/1920f);
+        panel.addView(actions,new LinearLayout.LayoutParams(-1,actionHeight));
+        exp2EditOverlay.addView(panel,new FrameLayout.LayoutParams(-1,-1));
+        root.addView(exp2EditOverlay,new FrameLayout.LayoutParams(-1,-1));
+        if(statusGlyph!=null)statusGlyph.bringToFront();
+        rebuildExp2EditPreviews();
+        exp2EditOverlay.setAlpha(0f);exp2EditOverlay.setTranslationY(dp(22));
+        exp2EditOverlay.animate().alpha(1f).translationY(0f).setDuration(180).start();
+        updateSystemStatusBar();
+    }
+    private void rebuildExp2EditPreviews(){
+        if(exp2EditPreviewRow==null)return;exp2EditPreviewRow.removeAllViews();
+        exp2PageBitmapCache.clear();
+        int count=Math.max(1,homePageCount());
+        for(int i=0;i<count;i++)addExp2PagePreview(i,false);
+        // The last child remains an in-memory destination for Drag/Drop, but
+        // Edit Mode exposes it as an explicit add-page action instead of
+        // presenting it as an already existing screen.
+        if(count<workspaceStrip.getChildCount())addExp2NewPageCard();
+        updateExp2EditSelection();
+    }
+    private int exp2PreviewCardWidth(){return Math.round(getResources().getDisplayMetrics().widthPixels*688f/1080f);}
+    private int exp2FullHomeWidth(){return Math.max(1,home==null?getResources().getDisplayMetrics().widthPixels:home.getWidth());}
+    private int exp2FullHomeHeight(){return Math.max(1,home==null?getResources().getDisplayMetrics().heightPixels:home.getHeight());}
+    private int exp2PreviewImageHeight(int cardWidth){return Math.max(dp(240),Math.round((cardWidth-dp(6))*exp2FullHomeHeight()/(float)exp2FullHomeWidth()));}
+    private int exp2PreviewCardHeight(int cardWidth){return exp2PreviewImageHeight(cardWidth)+dp(34+28);}
+    private void addExp2PagePreview(final int page,boolean temporary){
+        FrameLayout card=new FrameLayout(this);card.setTag(page);
+        int cardWidth=exp2PreviewCardWidth(),cardHeight=exp2PreviewCardHeight(cardWidth);
+        card.setBackground(exp2Glass(page==workspacePage?0x88427899:(temporary?0x663C6178:0x66526B80),page==workspacePage?0xE8F1FAFF:0x88E7F5FF,10));
+        card.setClipToOutline(true);
+        ImageView thumbnail=new ImageView(this);thumbnail.setScaleType(ImageView.ScaleType.FIT_CENTER);thumbnail.setImageBitmap(exp2PageBitmap(page));
+        thumbnail.setBackgroundColor(Color.TRANSPARENT);thumbnail.setClipToOutline(true);
+        FrameLayout.LayoutParams imageLp=new FrameLayout.LayoutParams(-1,-1);imageLp.setMargins(dp(3),dp(34),dp(3),dp(30));card.addView(thumbnail,imageLp);
+        TextView pageLabel=label("Экран "+(page+1)+(temporary?" · новый":""),12,Color.WHITE);pageLabel.setGravity(Gravity.CENTER_VERTICAL|Gravity.LEFT);pageLabel.setPadding(dp(8),0,0,0);
+        pageLabel.setShadowLayer(dp(2),0,dp(1),0xCC102131);
+        card.addView(pageLabel,new FrameLayout.LayoutParams(-1,dp(34),Gravity.TOP|Gravity.LEFT));
+        TextView delete=label("×",27,Color.WHITE);delete.setContentDescription("Удалить экран "+(page+1));delete.setBackground(exp2Glass(0xD98A4658,0x99FFECEF,6));
+        delete.setOnClickListener(v->deleteExp2Page(page));card.addView(delete,new FrameLayout.LayoutParams(dp(48),dp(34),Gravity.TOP|Gravity.RIGHT));
+        card.setOnClickListener(v->{settleWorkspace(page);exitExp2EditMode();});
+        LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(cardWidth,cardHeight);lp.setMargins(dp(6),dp(8),dp(6),dp(8));exp2EditPreviewRow.addView(card,lp);
+    }
+    private void addExp2NewPageCard(){
+        int cardWidth=exp2PreviewCardWidth(),cardHeight=exp2PreviewCardHeight(cardWidth);
+        FrameLayout card=new FrameLayout(this);card.setTag("add-page");
+        card.setBackground(exp2Glass(0x665D7890,0xA6E7F5FF,10));card.setClipToOutline(true);
+        LinearLayout content=new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);content.setGravity(Gravity.CENTER);
+        TextView plus=label("+",58,Color.WHITE);plus.setGravity(Gravity.CENTER);plus.setShadowLayer(dp(3),0,dp(2),0xCC102131);
+        TextView caption=label("Новый\nрабочий стол",17,Color.WHITE);caption.setGravity(Gravity.CENTER);caption.setShadowLayer(dp(2),0,dp(1),0xCC102131);
+        content.addView(plus,new LinearLayout.LayoutParams(-1,dp(82)));content.addView(caption,new LinearLayout.LayoutParams(-1,dp(64)));
+        card.addView(content,new FrameLayout.LayoutParams(-1,-1));
+        card.setContentDescription("Добавить новый рабочий стол");
+        card.setOnClickListener(v->{if(exp2AddPageInProgress)return;exp2AddPageInProgress=true;addExp2Page();handler.postDelayed(()->exp2AddPageInProgress=false,500);});
+        LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(cardWidth,cardHeight);lp.setMargins(dp(6),dp(8),dp(6),dp(8));exp2EditPreviewRow.addView(card,lp);
+    }
+    private final class EditPreviewScrollView extends HorizontalScrollView{
+        private float downX,downY,lastX;private boolean horizontalDrag;private VelocityTracker velocity;
+        EditPreviewScrollView(Context context){super(context);setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);setSmoothScrollingEnabled(true);}
+        @Override public boolean dispatchTouchEvent(MotionEvent event){
+            int action=event.getActionMasked();
+            if(action==MotionEvent.ACTION_DOWN){downX=lastX=event.getX();downY=event.getY();horizontalDrag=false;velocity=VelocityTracker.obtain();velocity.addMovement(event);}
+            else if(action==MotionEvent.ACTION_MOVE){
+                if(velocity!=null)velocity.addMovement(event);
+                float dx=event.getX()-downX,dy=event.getY()-downY;
+                if(!horizontalDrag&&Math.abs(dx)>touchSlop&&Math.abs(dx)>Math.abs(dy)){
+                    MotionEvent cancel=MotionEvent.obtain(event);cancel.setAction(MotionEvent.ACTION_CANCEL);super.dispatchTouchEvent(cancel);cancel.recycle();horizontalDrag=true;
+                }
+                if(horizontalDrag){scrollBy(Math.round(lastX-event.getX()),0);lastX=event.getX();return true;}
+            }else if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL){
+                boolean wasDragging=horizontalDrag;
+                if(velocity!=null)velocity.addMovement(event);
+                if(horizontalDrag&&action==MotionEvent.ACTION_UP&&velocity!=null){velocity.computeCurrentVelocity(1000);fling(Math.round(-velocity.getXVelocity()));}
+                horizontalDrag=false;lastX=event.getX();if(velocity!=null){velocity.recycle();velocity=null;}if(wasDragging)return true;
+            }
+            return super.dispatchTouchEvent(event);
+        }
+        @Override public boolean onInterceptTouchEvent(MotionEvent event){
+            int action=event.getActionMasked();
+            if(action==MotionEvent.ACTION_DOWN){downX=event.getX();downY=event.getY();horizontalDrag=false;}
+            else if(action==MotionEvent.ACTION_MOVE&&!horizontalDrag){
+                float dx=event.getX()-downX,dy=event.getY()-downY;
+                if(Math.abs(dx)>touchSlop&&Math.abs(dx)>Math.abs(dy)){horizontalDrag=true;requestDisallowInterceptTouchEvent(false);return true;}
+            }else if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL)horizontalDrag=false;
+            return super.onInterceptTouchEvent(event);
+        }
+        @Override public boolean onTouchEvent(MotionEvent event){
+            boolean handled=super.onTouchEvent(event);
+            if(event.getActionMasked()==MotionEvent.ACTION_UP||event.getActionMasked()==MotionEvent.ACTION_CANCEL)horizontalDrag=false;
+            return handled;
+        }
+    }
+    private Bitmap exp2PageBitmap(int page){
+        Bitmap cached=exp2PageBitmapCache.get(page);if(cached!=null&&!cached.isRecycled())return cached;
+        View source=workspaceStrip==null||page<0||page>=workspaceStrip.getChildCount()?null:workspaceStrip.getChildAt(page);
+        int width=exp2FullHomeWidth(),height=exp2FullHomeHeight();
+        Bitmap bitmap=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888);Canvas canvas=new Canvas(bitmap);
+        drawExp2Wallpaper(canvas,width,height);
+        drawExp2HomeView(canvas,statusGlyph);
+        if(page==workspacePage)drawExp2HomeView(canvas,widgetScroller);
+        drawExp2HomeView(canvas,source);
+        drawExp2HomeView(canvas,dock);
+        exp2PageBitmapCache.put(page,bitmap);
+        return bitmap;
+    }
+    private void drawExp2HomeView(Canvas canvas,View view){
+        if(view==null||view.getWidth()<=0||view.getHeight()<=0||home==null)return;
+        int[] homeLocation=new int[2],viewLocation=new int[2];home.getLocationOnScreen(homeLocation);view.getLocationOnScreen(viewLocation);
+        int left=viewLocation[0]-homeLocation[0],top=viewLocation[1]-homeLocation[1];
+        canvas.save();canvas.translate(left,top);canvas.clipRect(0,0,view.getWidth(),view.getHeight());view.draw(canvas);canvas.restore();
+    }
+    private void drawExp2Wallpaper(Canvas canvas,int width,int height){
+        if(wallpaper==null||wallpaper.getDrawable()==null){canvas.drawColor(0xFF3B5565);return;}
+        Drawable source=wallpaper.getDrawable();
+        int intrinsicWidth=Math.max(1,source.getIntrinsicWidth()),intrinsicHeight=Math.max(1,source.getIntrinsicHeight());
+        float scale=Math.max(width/(float)intrinsicWidth,height/(float)intrinsicHeight);
+        int drawWidth=Math.max(width,Math.round(intrinsicWidth*scale)),drawHeight=Math.max(height,Math.round(intrinsicHeight*scale));
+        int left=(width-drawWidth)/2,top=(height-drawHeight)/2;
+        Rect old=new Rect(source.getBounds());source.setBounds(left,top,left+drawWidth,top+drawHeight);source.draw(canvas);source.setBounds(old);
+    }
+    private Drawable exp2Glass(int fill,int stroke,int radius){
+        GradientDrawable base=background(fill,radius);base.setStroke(Math.max(1,dp(1)),stroke);
+        GradientDrawable sheen=new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+            new int[]{0x55FFFFFF,0x16FFFFFF,0x00FFFFFF});sheen.setCornerRadius(dp(radius));
+        LayerDrawable glass=new LayerDrawable(new Drawable[]{base,sheen});
+        glass.setLayerInset(1,dp(1),dp(1),dp(1),dp(1));return glass;
+    }
+    private Bitmap exp2EditBackdrop(){
+        if(wallpaper==null||wallpaper.getDrawable()==null)return null;
+        if(exp2BlurredBackdrop!=null&&!exp2BlurredBackdrop.isRecycled())return exp2BlurredBackdrop;
+        try{
+            Bitmap sample=Bitmap.createBitmap(90,160,Bitmap.Config.ARGB_8888);Canvas canvas=new Canvas(sample);
+            Drawable source=wallpaper.getDrawable();Rect old=new Rect(source.getBounds());source.setBounds(0,0,90,160);source.draw(canvas);source.setBounds(old);
+            exp2BlurredBackdrop=blur(sample,5);return exp2BlurredBackdrop;
+        }catch(Exception ignored){return null;}
+    }
+    private void updateExp2EditSelection(){
+        if(exp2EditPreviewRow==null)return;int count=exp2EditPreviewRow.getChildCount();
+        for(int i=0;i<count;i++){View card=exp2EditPreviewRow.getChildAt(i);boolean selected=card.getTag() instanceof Integer&&((Integer)card.getTag())==workspacePage;boolean add="add-page".equals(card.getTag());if(!add)card.setBackground(exp2Glass(selected?0x884D9BC2:0x66526B80,selected?0xE8FFFFFF:0x66E7F5FF,10));}
+        if(exp2EditIndicator!=null)exp2EditIndicator.setText("Экран "+(Math.min(workspacePage,Math.max(0,homePageCount()-1))+1)+" из "+Math.max(1,homePageCount()));
+    }
+    private int countPageItems(int page){
+        int n=0;for(HomeWorkspaceModel.Placement p:workspaceModel.placements())if(p.page==page)n++;
+        for(String id:profilePrefs().getString("widgets","").split(","))try{if(profilePrefs().getInt("widget_page_"+Integer.parseInt(id),0)==page)n++;}catch(NumberFormatException ignored){}
+        return n;
+    }
+    private void addExp2Action(LinearLayout row,String text,final Runnable action){
+        LinearLayout button=new LinearLayout(this);button.setOrientation(LinearLayout.VERTICAL);button.setGravity(Gravity.CENTER);button.setBackground(exp2Glass(0x884B6C82,0xA6E7F5FF,8));
+        int iconRes="Обои".equals(text)?android.R.drawable.ic_menu_gallery:
+            "Темы".equals(text)?android.R.drawable.ic_menu_edit:
+            "Виджеты".equals(text)?android.R.drawable.ic_menu_view:android.R.drawable.ic_menu_preferences;
+        ImageView icon=new ImageView(this);icon.setImageResource(iconRes);icon.setColorFilter(Color.WHITE,android.graphics.PorterDuff.Mode.SRC_IN);button.addView(icon,new LinearLayout.LayoutParams(dp(28),dp(32)));
+        TextView caption=label(text,12,Color.WHITE);caption.setShadowLayer(dp(2),0,dp(1),0xCC102131);caption.setGravity(Gravity.CENTER);caption.setMaxLines(2);button.addView(caption,new LinearLayout.LayoutParams(-1,0,1));
+        button.setOnClickListener(v->action.run());
+        LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,-1,1);lp.setMargins(dp(3),0,dp(3),0);row.addView(button,lp);
+    }
+    private void addExp2Page(){
+        int last=Math.max(0,workspaceStrip.getChildCount()-1);
+        if(last<homePageCount()){Toast.makeText(this,"Новый рабочий стол недоступен",Toast.LENGTH_SHORT).show();return;}
+        settleWorkspace(last);exitExp2EditMode();Toast.makeText(this,"Разместите элемент: экран сохранится после подтверждённого Drop",Toast.LENGTH_SHORT).show();
+    }
+    private void deleteExp2Page(final int page){
+        if(countPageItems(page)>0){
+            new AlertDialog.Builder(this).setTitle("Экран содержит элементы").setMessage("Сначала перенесите иконки и виджеты. Формат Home не изменён.").setPositiveButton("Понятно",null).show();return;
+        }
+        int transientPage=Math.max(0,workspaceStrip.getChildCount()-1);
+        if(page!=transientPage){Toast.makeText(this,"Постоянные пустые страницы не представлены в текущей модели",Toast.LENGTH_SHORT).show();return;}
+        settleWorkspace(Math.max(0,page-1));rebuildExp2EditPreviews();
+    }
+    private void exitExp2EditMode(){
+        if(!exp2EditMode)return;exp2EditMode=false;
+        if(exp2EditOverlay!=null){FrameLayout overlay=exp2EditOverlay;exp2EditOverlay=null;overlay.animate().alpha(0f).translationY(dp(22)).setDuration(150).withEndAction(()->root.removeView(overlay)).start();}
+        updateSystemStatusBar();
+    }
     private void showDrawerOptions(){
         showNokiaDialog(new AlertDialog.Builder(this).setTitle("Приложения").setItems(new String[]{"Создать папку","Восстановить скрытые","Настройки","Добавить виджет"},(d,n)->{
             if(n==0)createFolder(null);else if(n==1)restoreHidden();else if(n==2)showSettings();else addWidget();
@@ -1356,19 +1980,46 @@ public final class LauncherActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Скрытые приложения").setItems(labels,(d,n)->{menu.organizer.restore(hidden.get(n));refreshGrid();}).setNegativeButton("Закрыть",null).show();
     }
     private void showSettings(){
-        String[] choices={"Внешний вид →","Цвет темы","Сетка приложений","Обои","Размытие обоев","Затемнение меню","Прозрачность окон","Ярлыки Home","Виджеты","Заставка","Звуки Nokia","Сброс меню"};
+        String[] choices={"Внешний вид →","Цвет темы","Сетка приложений","Сетка рабочего стола Exp2: "+exp2GridLabel(),"Обои","Размытие обоев","Затемнение меню","Прозрачность окон","Ярлыки Home","Виджеты","Заставка","Звуки Nokia","Сброс меню","Home Engine Exp 2: "+(exp2HomeEngineEnabled()?"Вкл":"Выкл"),"Цвет иконок статус-бара: "+statusIconColorLabel()};
         final AlertDialog[] current=new AlertDialog[1];
         AlertDialog.Builder builder=new AlertDialog.Builder(this)
             .setCustomTitle(settingsTitle("Nokia Experience · Настройки",()->{if(current[0]!=null)current[0].dismiss();}))
             .setItems(choices,(d,n)->{
             switch(n){
-                case 0:showAppearanceSettings();break;case 1:chooseThemeColor();break;case 2:chooseGrid();break;case 3:chooseWallpaper();break;
-                case 4:chooseBlur();break;case 5:chooseDim();break;case 6:chooseWindowTransparency();break;
-                case 7:chooseDockSettings();break;case 8:addWidget();break;case 9:chooseStartup();break;case 10:chooseSounds();break;
-                case 11:new AlertDialog.Builder(this).setTitle("Сброс меню").setPositiveButton("Сбросить",(x,w)->{menu.organizer.reset();refreshGrid();}).setNegativeButton("Отмена",null).show();
+                case 0:showAppearanceSettings();break;case 1:chooseThemeColor();break;case 2:chooseGrid();break;case 3:chooseExp2HomeGrid();break;case 4:chooseWallpaper();break;
+                case 5:chooseBlur();break;case 6:chooseDim();break;case 7:chooseWindowTransparency();break;
+                case 8:chooseDockSettings();break;case 9:addWidget();break;case 10:chooseStartup();break;case 11:chooseSounds();break;
+                case 12:new AlertDialog.Builder(this).setTitle("Сброс меню").setPositiveButton("Сбросить",(x,w)->{menu.organizer.reset();refreshGrid();}).setNegativeButton("Отмена",null).show();break;
+                case 13:toggleExp2HomeEngine();break;case 14:chooseStatusIconColor();break;
             }
         });
         current[0]=showSettingsDialog(builder);
+    }
+    private String exp2GridLabel(){
+        if(!exp2())return "только Exp2";
+        return "4x4+1 виджет".equals(profilePrefs().getString("exp2_home_grid","3x4+2widgets"))?"4 × 4 + 1 виджет":"3 × 4 + 2 виджета";
+    }
+    private void chooseExp2HomeGrid(){
+        if(!exp2()){Toast.makeText(this,"Доступно только для Nokia Exp 2",Toast.LENGTH_SHORT).show();return;}
+        String[] choices={"4 × 4 + 1 виджет","3 × 4 + 2 виджета"};
+        int selected="4x4+1 виджет".equals(profilePrefs().getString("exp2_home_grid","3x4+2widgets"))?0:1;
+        new AlertDialog.Builder(this).setTitle("Сетка рабочего стола Exp2\nDock не входит; модель хранит 12 ячеек")
+            .setSingleChoiceItems(choices,selected,(dialog,which)->{
+                if(which==0){
+                    new AlertDialog.Builder(this).setTitle("Конфигурация не применена")
+                        .setMessage("Вариант 4 × 4 требует расширения модели до 16 ячеек и изменения формата размещения. Чтобы не потерять иконки и не выполнять миграцию, сохранена безопасная конфигурация 3 × 4 + 2 виджета.")
+                        .setPositiveButton("Понятно",null).show();
+                }else{
+                    profilePrefs().edit().putString("exp2_home_grid","3x4+2widgets").apply();
+                    dialog.dismiss();Toast.makeText(this,"Применено: 3 × 4 + 2 виджета",Toast.LENGTH_SHORT).show();
+                    refreshWorkspace();
+                }
+            }).setNegativeButton("Отмена",null).show();
+    }
+    private void toggleExp2HomeEngine(){
+        if(!exp2()){Toast.makeText(this,"Доступно только для Nokia Exp 2",Toast.LENGTH_SHORT).show();return;}
+        exp2Prefs.edit().putBoolean("home_engine_v2",!exp2HomeEngineEnabled()).apply();
+        refreshWorkspace();showSettings();
     }
     private void showAppearanceSettings(){
         final AlertDialog[] current=new AlertDialog[1];
@@ -1477,6 +2128,7 @@ public final class LauncherActivity extends Activity {
             try{image=WallpaperManager.getInstance(this).getBuiltInDrawable();}catch(Exception ignored){}
         }
         wallpaper.setImageDrawable(image);
+        exp2PageBitmapCache.clear();exp2BlurredBackdrop=null;
         cachedDrawerSource=null;
         cachedDrawerBlur=-1;
         updateDrawerBackground();
