@@ -8,6 +8,13 @@
 
 ## Русский
 
+### Скачать
+
+- [GitHub Release v0.1-mvp](https://github.com/dev2v07/Nokia-Expirience/releases/tag/v0.1-mvp)
+- [Скачать Debug APK](https://github.com/dev2v07/Nokia-Expirience/releases/download/v0.1-mvp/Nokia-Experience-2-v0.1-mvp.apk)
+
+Релиз содержит Debug APK. Это не подписанная production Release-сборка.
+
 ### О проекте
 
 Nokia Experience 2 — экспериментальный Android Launcher, который объединяет собственный визуальный стиль Nokia с исследованными поведенческими решениями рабочего стола Samsung Experience. Проект включает рабочий стол, Drawer, Edit Mode, статус-бар, drag-and-drop, виджеты, темы и исследовательскую документацию.
@@ -120,6 +127,13 @@ Launcher и накопленное состояние исследований �
 - APK, keystore, device logs и локальные настройки намеренно не публикуются.
 
 ## English
+
+### Download
+
+- [GitHub Release v0.1-mvp](https://github.com/dev2v07/Nokia-Expirience/releases/tag/v0.1-mvp)
+- [Download Debug APK](https://github.com/dev2v07/Nokia-Expirience/releases/download/v0.1-mvp/Nokia-Experience-2-v0.1-mvp.apk)
+
+The release contains a Debug APK. It is not a production-signed Release build.
 
 ### About
 
