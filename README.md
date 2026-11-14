@@ -4,7 +4,11 @@
 
 **🇷🇺 [Русский](#русский)** · **🇬🇧 [English](#english)**
 
-![Nokia Experience 2 real launcher preview](docs/images/nokia-experience-preview.png)
+### Реальные кадры Launcher
+
+![Nokia Experience 2 Home](docs/images/nokia-experience-home.png)
+![Nokia Experience 2 App Drawer](docs/images/nokia-experience-drawer.png)
+![Nokia Experience 2 Edit Mode](docs/images/nokia-experience-edit-mode.png)
 
 ## Русский
 
@@ -19,7 +23,7 @@
 
 Nokia Experience 2 — экспериментальный Android Launcher, который объединяет собственный визуальный стиль Nokia с исследованными поведенческими решениями рабочего стола Samsung Experience. Проект включает рабочий стол, Drawer, Edit Mode, статус-бар, drag-and-drop, виджеты, темы и исследовательскую документацию.
 
-Показанное выше изображение — реальный screenshot Nokia B из device-проверки Launcher, а не макет Studio. Он скопирован из последнего качественного pairwise device-capture в `outputs/samsung-behavioral-research/pairwise/`.
+Показанные выше изображения — реальные screenshots Nokia B из device-проверки Launcher, а не макет Studio. Они показывают Home, App Drawer и Edit Mode.
 
 ### Возможности
 
@@ -139,7 +143,7 @@ The release contains a Debug APK. It is not a production-signed Release build.
 
 Nokia Experience 2 is an experimental Android Launcher that combines a Nokia visual language with workspace behavior learned from the Samsung Experience research. The project includes Home screens, Drawer, Edit Mode, the status bar, drag and drop, widgets, themes and the supporting research record.
 
-The image above is a real Nokia B Launcher screenshot captured during device testing, not a Studio mockup. It was copied from the latest quality pairwise device capture under `outputs/samsung-behavioral-research/pairwise/`.
+The images above are real Nokia B Launcher screenshots captured during device testing, not Studio mockups. They show Home, App Drawer and Edit Mode.
 
 ### Features
 
